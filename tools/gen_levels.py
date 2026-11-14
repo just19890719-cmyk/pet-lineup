@@ -1,4 +1,4 @@
-"""產生 100 關的關卡資料：隨機發牌 → 用解題程式確認解得開 → 寫成 scripts/level_data.gd
+"""產生 100 關的關卡資料：隨機發牌 → 用解題程式確認解得開並算難度分數 → 每關挑最貼近目標直線的盤面 → 寫成 scripts/level_data.gd
 用法：python tools/gen_levels.py
 每關格式："每欄格數,開放暫存格數;欄1|欄2|..."，字母代表動物種類，大寫 = 開局就翻開。
 """
@@ -8,22 +8,29 @@ import random
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-# ───────── 難度表 ─────────
-def cfg(L):
-    """回傳 (動物種類, 欄數, 每欄格數, 開放暫存格, 開局翻開比例, 挑選方式)"""
+# ───────── 難度表（純直線） ─────────
+SCORE_FIRST = 25.0     # 第 1 關的目標難度分數
+SCORE_LAST = 200.0     # 第 100 關的目標難度分數
+
+
+def target(L):
+    """每一關的目標難度分數：從第 1 關到第 100 關是一條直線"""
+    return SCORE_FIRST + (SCORE_LAST - SCORE_FIRST) * (L - 1) / 99.0
+
+
+def score(steps, nodes):
+    """難度分數 = 解法步數 ×（1 + 走錯路的程度）。照直覺走就能解開時，分數等於步數。"""
+    import math
+    return steps * (1.0 + 0.5 * math.log10(max(1.0, nodes / float(steps))))
+
+
+def nominal(L):
+    """這一關大概的盤面大小：(動物種類, 每欄格數, 開放暫存格, 開局翻開比例)"""
     p = (L - 1) / 99.0
     T = 4 if L <= 4 else 5 if L <= 18 else 6 if L <= 50 else 7
     cap = 6 + round(6 * p ** 0.75)
-    breather = L > 1 and L % 5 == 1          # 每 5 關後一關喘口氣
-    boss = L % 10 == 0                        # 每 10 關一個魔王關
-    spare = 2 if breather else 1
-    if T + spare > 8:
-        T = 8 - spare
-    n = T + spare
     slots = 3 if L <= 60 else 2 if L <= 85 else 1
-    reveal = 0.40 - 0.32 * p
-    pick = "hard" if boss else "easy" if (breather or L in (61, 62, 86, 87)) else "mid"
-    return T, n, cap, slots, reveal, pick
+    return T, cap, slots, 0.40 - 0.32 * p
 
 
 # ───────── 發牌與解題 ─────────
@@ -134,33 +141,42 @@ def solve(cols, cap, nslots, limit=40000):
 
 # ───────── 主程式 ─────────
 def main():
+    import json
     lines, report = [], []
     for L in range(1, 101):
-        T, n, cap, slots, reveal, pick = cfg(L)
+        T0, cap0, slots, reveal = nominal(L)
+        want = target(L)
         rng = random.Random(L * 1000003)
-        cands = []
-        tries = 0
-        while len(cands) < 14 and tries < 200:
-            tries += 1
-            board = deal(T, n, cap, rng)
-            if any(len(set(c)) == 1 and len(c) >= cap - 1 for c in board):
-                continue                     # 開局就幾乎排好一欄的不要
-            steps, nodes = solve(board, cap, slots)
-            if steps >= 0:
-                cands.append((nodes, steps, board))
-        assert cands, "第 %d 關找不到解得開的盤面" % L
-        cands.sort(key=lambda c: c[0])
-        if pick == "hard":
-            nodes, steps, board = cands[-1]
-        elif pick == "easy":
-            nodes, steps, board = cands[0]
-        else:
-            nodes, steps, board = cands[len(cands) // 2]
+        best = None
+        tested = 0
+        for T in sorted({max(4, T0 - 1), T0}):
+            for cap in sorted({max(5, cap0 - 1), cap0, min(12, cap0 + 1)}):
+                for spare in (1, 2):
+                    n = T + spare
+                    if n > 8:
+                        continue
+                    for _ in range(5):
+                        board = deal(T, n, cap, rng)
+                        if any(len(set(c)) == 1 and len(c) >= cap - 1 for c in board):
+                            continue                 # 開局就幾乎排好一欄的不要
+                        steps, nodes = solve(board, cap, slots, 30000)
+                        if steps < 0:
+                            continue
+                        tested += 1
+                        sc = score(steps, nodes)
+                        # 最貼近目標直線的優先；差不多時選盤面大小接近預定值的
+                        cost = abs(sc - want) + 0.6 * (abs(T - T0) * 3 + abs(cap - cap0) + (spare - 1))
+                        if best is None or cost < best[0]:
+                            best = (cost, sc, steps, nodes, board, T, n, cap)
+        assert best, "第 %d 關找不到解得開的盤面" % L
+        _, sc, steps, nodes, board, T, n, cap = best
         text = []
         for c in board:
             text.append("".join(chr(97 + t).upper() if rng.random() < reveal else chr(97 + t) for t in c))
         lines.append('\t"%d,%d;%s",' % (cap, slots, "|".join(text)))
-        report.append((L, T, n, cap, slots, round(reveal, 2), pick, steps, nodes, tries))
+        report.append([L, T, n, cap, slots, round(want, 1), round(sc, 1), steps, nodes, tested])
+        print("第 %3d 關  目標 %5.1f  實際 %5.1f  (%d 種 %d 欄 %d 格 暫存 %d，步數 %d，搜尋 %d，候選 %d)"
+              % (L, want, sc, T, n, cap, slots, steps, nodes, tested), flush=True)
     out = os.path.join(ROOT, "scripts", "level_data.gd")
     with open(out, "w", encoding="utf-8", newline="\n") as f:
         f.write("extends RefCounted\n")
@@ -169,10 +185,10 @@ def main():
         f.write("const DATA: Array[String] = [\n")
         f.write("\n".join(lines))
         f.write("\n]\n")
-    print("關  種類 欄 格數 暫存 翻開 挑選  解法步數 搜尋量 嘗試")
-    for r in report:
-        if r[0] <= 10 or r[0] % 5 == 0 or r[0] in (61, 86):
-            print("%3d   %d   %d  %2d    %d   %.2f %-5s  %4d  %6d  %3d" % r)
+    with open(os.path.join(ROOT, "tools", "level_report.json"), "w", encoding="utf-8") as f:
+        json.dump(report, f, separators=(",", ":"))
+    dev = [abs(r[6] - r[5]) for r in report]
+    print("最大偏差 %.1f 分，平均偏差 %.1f 分" % (max(dev), sum(dev) / len(dev)))
 
 
 if __name__ == "__main__":

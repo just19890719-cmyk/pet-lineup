@@ -67,7 +67,15 @@ var tut_done := false
 var title_layer: Control
 var skip_btn: Button
 var settings_btn: Button
-var slot_open := 3              # 這一關開局就能用的暫存格數（後面的關卡會變少）
+var reveal_btn: Button
+var ad_layer: Control
+var no_ads := false             # 已買免廣告：不跳插頁廣告，求救道具不用看廣告
+var undo_left := -1             # 這一關剩下的免費撤回次數；-1 = 無限
+var reveal_free := 0            # 這一關剩下的免費「翻問號」次數
+var ad_this_level := false      # 這一關玩家是否已主動看過廣告
+var wins_since_ad := 0
+var last_ad_ms := -1000000
+var slot_open := 3             # 這一關開局就能用的暫存格數（後面的關卡會變少）
 var slot_n := 4                 # 畫面上顯示的暫存格數 = 開放的 + 1 格可解鎖
 var sfx: Dictionary = {}        # 音效名稱 → AudioStream
 var sfx_players: Array = []
@@ -93,6 +101,7 @@ func _ready() -> void:
 	_build_theme()
 	_build_styles()
 	_build_ui()
+	no_ads = _load_flag("no_ads")
 	sfx_on = not _load_flag("sfx_off")
 	music_on = not _load_flag("music_off")
 	_init_audio()
@@ -114,6 +123,13 @@ func _ready() -> void:
 	for a in args:
 		if a.begins_with("--level="):
 			start_level(int(a.get_slice("=", 1)))
+	if args.has("--ask-undo"):
+		undo_left = 0
+		_ask_more_undo()
+	if args.has("--ask-unlock"):
+		_request_unlock(slot_n - 1)
+	if args.has("--fake-ad"):
+		_dev_fake_ad()
 	if args.has("--check-levels"):
 		# 逐關載入檢查：每種動物數量剛好等於每欄格數、沒有超出格數的欄
 		var bad := 0
@@ -312,8 +328,9 @@ func _build_ui() -> void:
 	skip_btn = _make_button("跳過", Vector2(8, 14), Vector2(76, 44), func() -> void: _finish_tutorial(), 18)
 	skip_btn.visible = false
 	settings_btn = _make_button("設定", Vector2(8, 14), Vector2(76, 44), _show_settings, 18)
-	undo_btn = _make_button("撤回", Vector2(60, 776), Vector2(170, 58), _on_undo)
-	restart_btn = _make_button("重新開始", Vector2(250, 776), Vector2(170, 58), _on_restart)
+	undo_btn = _make_button("撤回", Vector2(16, 776), Vector2(142, 58), _on_undo, 20)
+	reveal_btn = _make_button("翻問號", Vector2(169, 776), Vector2(142, 58), _on_reveal, 20)
+	restart_btn = _make_button("重新開始", Vector2(322, 776), Vector2(142, 58), _on_restart, 20)
 	dev_btn = _make_button("開發", Vector2(396, 14), Vector2(76, 44), _toggle_dev, 18)
 	_build_dev_panel()
 	# 給玩家的正式版不顯示開發按鈕（從編輯器或執行遊戲.bat 開啟時仍然有）
@@ -325,7 +342,7 @@ func _build_dev_panel() -> void:
 	dev_panel.position = Vector2(30, 44)
 	dev_panel.visible = false
 	var vb := VBoxContainer.new()
-	vb.add_theme_constant_override("separation", 5)
+	vb.add_theme_constant_override("separation", 3)
 	dev_panel.add_child(vb)
 	var title := Label.new()
 	title.text = "開發工具"
@@ -347,14 +364,17 @@ func _build_dev_panel() -> void:
 		["回開始畫面", _show_title],
 		["重看新手教學", _start_tutorial],
 		["灑彩帶", _spawn_confetti],
+		["重置求救次數", _dev_reset_helpers],
+		["切換免廣告", _dev_toggle_no_ads],
+		["模擬插頁廣告", _dev_fake_ad],
 		["關閉", func() -> void: pass],
 	]
 	for it in items:
 		var b := Button.new()
 		b.text = it[0]
-		b.custom_minimum_size = Vector2(360, 37)
+		b.custom_minimum_size = Vector2(360, 32)
 		b.focus_mode = Control.FOCUS_NONE
-		b.add_theme_font_size_override("font_size", 18)
+		b.add_theme_font_size_override("font_size", 16)
 		var cb: Callable = it[1]
 		b.pressed.connect(func() -> void:
 			dev_panel.visible = false
@@ -373,6 +393,7 @@ func start_level(l: int, sd: int = -1) -> void:
 	level = max(1, l)
 	tut_active = false
 	combo = 0
+	_reset_helpers()
 	seen.clear()
 	if sd < 0:
 		sd = level * 7919 + 17
@@ -728,6 +749,11 @@ func _restore_tile(d: Dictionary) -> Dictionary:
 func _on_undo() -> void:
 	if history.is_empty():
 		return
+	if undo_left == 0:
+		_ask_more_undo()
+		return
+	if undo_left > 0:
+		undo_left -= 1
 	_play("undo")
 	var snap: Dictionary = history.pop_back()
 	cols = []
@@ -823,7 +849,7 @@ func _tap_col(i: int) -> void:
 
 func _tap_slot(k: int) -> void:
 	if not slot_unlocked[k]:
-		_unlock_slot(k)
+		_request_unlock(k)
 		return
 	if slots[k] != null:
 		if sel_slot == k:
@@ -1076,6 +1102,14 @@ func _update_ui() -> void:
 	hint_label.visible = level <= 2 and not tut_active
 	undo_btn.visible = not tut_active
 	restart_btn.visible = not tut_active
+	reveal_btn.visible = not tut_active
+	reveal_btn.disabled = _hidden_tiles().is_empty()
+	if undo_left < 0:
+		undo_btn.text = "撤回"
+	elif undo_left > 0:
+		undo_btn.text = "撤回 ×%d" % undo_left
+	else:
+		undo_btn.text = "補撤回"
 	skip_btn.visible = tut_active
 	settings_btn.visible = not tut_active
 	undo_btn.disabled = history.is_empty()
@@ -1141,17 +1175,19 @@ func _show_dialog(title: String, msg: String, buttons: Array) -> void:
 
 func _show_win() -> void:
 	if level == MAX_LEVEL:
-		_show_dialog("恭喜全破！", "100 關全部完成，太厲害了！\n後面還有更多關卡等你挑戰", [["繼續挑戰", func() -> void: start_level(level + 1)]])
+		_show_dialog("恭喜全破！", "100 關全部完成，太厲害了！\n後面還有更多關卡等你挑戰", [["繼續挑戰", _next_level]])
 		return
-	_show_dialog("過關！", "所有動物都排好了，好棒！", [["下一關", func() -> void: start_level(level + 1)]])
+	_show_dialog("過關！", "所有動物都排好了，好棒！", [["下一關", _next_level]])
 
 
 func _show_stuck() -> void:
 	var btns: Array = []
 	if not history.is_empty():
-		btns.append(["撤回一步", _on_undo])
+		btns.append(["撤回一步" if undo_left != 0 else "補撤回次數", _on_undo])
 	if not slot_unlocked[slot_n - 1]:
-		btns.append(["解鎖暫存格", func() -> void: _unlock_slot(slot_n - 1)])
+		btns.append(["解鎖暫存格", func() -> void: _request_unlock(slot_n - 1)])
+	if not _hidden_tiles().is_empty():
+		btns.append(["翻開問號", _on_reveal])
 	btns.append(["重新開始", _on_restart])
 	_show_dialog("卡住了", "沒有可以走的步了", btns)
 	_play("stuck")
@@ -1314,6 +1350,169 @@ func _set_music(v: bool) -> void:
 		else:
 			music_player.stop()
 	_show_settings()
+
+
+# ───────────────────────── 求救道具與廣告 ─────────────────────────
+## 規則（數字集中在這裡，方便之後調整）
+const HONEYMOON_LEVELS := 10      # 前幾關：撤回無限、解鎖免費、不跳插頁廣告
+const UNDO_FREE_MID := 3          # 第 11–60 關每關免費撤回次數
+const UNDO_FREE_LATE := 5         # 第 61 關以後每關免費撤回次數
+const UNDO_PER_AD := 5            # 看一次廣告補幾次撤回
+const REVEAL_PER_USE := 3         # 翻問號一次翻開幾個
+const AD_EVERY_WINS := 3          # 每過幾關才可能跳一次插頁廣告
+const AD_MIN_GAP_MS := 120000     # 兩次廣告至少間隔（毫秒）
+const FAKE_AD_SECONDS := 3
+
+
+func _reset_helpers() -> void:
+	if level <= HONEYMOON_LEVELS:
+		undo_left = -1
+		reveal_free = 1
+	else:
+		undo_left = UNDO_FREE_MID if level <= 60 else UNDO_FREE_LATE
+		reveal_free = 0
+	ad_this_level = false
+
+
+func _hidden_tiles() -> Array:
+	var out: Array = []
+	for c in cols:
+		for t in c:
+			if not t["r"]:
+				out.append(t)
+	return out
+
+
+## 按鈕文字：已買免廣告就不提「看廣告」
+func _ad_text(with_ad: String, without_ad: String) -> String:
+	return without_ad if no_ads else with_ad
+
+
+func _ask_more_undo() -> void:
+	_show_dialog("撤回用完了", _ad_text("看一段廣告，可以再撤回 %d 次" % UNDO_PER_AD, "再給你 %d 次撤回" % UNDO_PER_AD), [
+		[_ad_text("看廣告補 %d 次" % UNDO_PER_AD, "補 %d 次" % UNDO_PER_AD), func() -> void: _reward_ad(_grant_undo)],
+		["重新開始（免費）", _on_restart],
+		["不用了", _close_overlay],
+	])
+
+
+func _grant_undo() -> void:
+	undo_left += UNDO_PER_AD
+	_update_ui()
+
+
+func _dev_reset_helpers() -> void:
+	_reset_helpers()
+	_update_ui()
+
+
+func _dev_toggle_no_ads() -> void:
+	no_ads = not no_ads
+	_save_flag("no_ads", no_ads)
+	_show_dialog("免廣告：%s" % ("開" if no_ads else "關"), "", [["知道了", _close_overlay]])
+
+
+func _dev_fake_ad() -> void:
+	_fake_ad("過關廣告", _update_ui)
+
+
+func _request_unlock(k: int) -> void:
+	if slot_unlocked[k]:
+		return
+	if tut_active or level <= HONEYMOON_LEVELS:
+		_unlock_slot(k)
+		return
+	_show_dialog("解鎖暫存格", _ad_text("看一段廣告，這一關多一格暫存格", "這一關多一格暫存格"), [
+		[_ad_text("看廣告解鎖", "解鎖"), func() -> void: _reward_ad(func() -> void: _unlock_slot(k))],
+		["不用了", _close_overlay],
+	])
+
+
+func _on_reveal() -> void:
+	if _hidden_tiles().is_empty():
+		return
+	if reveal_free > 0:
+		reveal_free -= 1
+		_close_overlay()
+		_do_reveal()
+		return
+	_show_dialog("翻開問號", _ad_text("看一段廣告，隨機翻開 %d 個問號" % REVEAL_PER_USE, "隨機翻開 %d 個問號" % REVEAL_PER_USE), [
+		[_ad_text("看廣告翻開", "翻開"), func() -> void: _reward_ad(_do_reveal)],
+		["不用了", _close_overlay],
+	])
+
+
+func _do_reveal() -> void:
+	var hidden := _hidden_tiles()
+	hidden.shuffle()
+	for n in min(REVEAL_PER_USE, hidden.size()):
+		var t: Dictionary = hidden[n]
+		t["r"] = true
+		t["pop"] = POP_TIME
+		seen[t["id"]] = true
+	_play("flip")
+	_update_ui()
+
+
+## 玩家主動看的獎勵廣告：看完才給獎勵；已買免廣告直接給
+func _reward_ad(reward: Callable) -> void:
+	_close_overlay()
+	if no_ads:
+		reward.call()
+		return
+	ad_this_level = true
+	_fake_ad("獎勵廣告", reward)
+
+
+## 過關後進下一關，符合條件時先跳插頁廣告
+func _next_level() -> void:
+	var nxt := level + 1
+	wins_since_ad += 1
+	var due := not no_ads and level > HONEYMOON_LEVELS and wins_since_ad >= AD_EVERY_WINS \
+		and not ad_this_level and Time.get_ticks_msec() - last_ad_ms >= AD_MIN_GAP_MS
+	if due:
+		_fake_ad("過關廣告", func() -> void: start_level(nxt))
+	else:
+		start_level(nxt)
+
+
+## 假廣告畫面（還沒接真的廣告服務）：倒數幾秒後自動關閉並執行 then
+func _fake_ad(kind: String, then: Callable) -> void:
+	if ad_layer != null:
+		return
+	_close_overlay()
+	wins_since_ad = 0
+	last_ad_ms = Time.get_ticks_msec()
+	ad_layer = Control.new()
+	ad_layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	ad_layer.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(ad_layer)
+	var bg := ColorRect.new()
+	bg.color = Color(0.08, 0.06, 0.1, 0.94)
+	bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ad_layer.add_child(bg)
+	var texts := [
+		[kind, 34, 300.0, Color("ffd34d")],
+		["這是測試用的假廣告", 20, 360.0, Color.WHITE],
+		["正式版會在這裡播放真的廣告", 18, 394.0, Color(1, 1, 1, 0.7)],
+	]
+	for it in texts:
+		var l := _make_label(it[0], it[1], Vector2(0, it[2]), 480, it[3], Color(0, 0, 0, 0.6), 4)
+		remove_child(l)
+		ad_layer.add_child(l)
+	var count := _make_label(str(FAKE_AD_SECONDS), 72, Vector2(0, 450), 480, Color.WHITE, Color(0, 0, 0, 0.6), 6)
+	remove_child(count)
+	ad_layer.add_child(count)
+	var layer := ad_layer
+	var tw := layer.create_tween()
+	for s in range(FAKE_AD_SECONDS, 0, -1):
+		tw.tween_callback(func() -> void: count.text = str(s))
+		tw.tween_interval(1.0)
+	tw.tween_callback(func() -> void:
+		ad_layer = null
+		layer.queue_free()
+		then.call())
 
 
 # ───────────────────────── 彩帶 ─────────────────────────
