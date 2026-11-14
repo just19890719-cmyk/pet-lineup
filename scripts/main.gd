@@ -23,7 +23,8 @@ const TUT := [
 	{"col": 2, "text": "放過去，全部排好就過關"},
 ]
 # [動物種類數, 欄數, 每欄容量]
-const LEVELS := [[4, 5, 6], [5, 6, 7], [5, 7, 8], [6, 7, 9], [6, 8, 10], [7, 8, 11], [6, 8, 12]]
+const LevelData := preload("res://scripts/level_data.gd")
+const MAX_LEVEL := 100
 
 var level: int = 1
 var cols: Array = []          # Array[Array[Dictionary]]，索引 0 = 最底
@@ -66,6 +67,8 @@ var tut_done := false
 var title_layer: Control
 var skip_btn: Button
 var settings_btn: Button
+var slot_open := 3              # 這一關開局就能用的暫存格數（後面的關卡會變少）
+var slot_n := 4                 # 畫面上顯示的暫存格數 = 開放的 + 1 格可解鎖
 var sfx: Dictionary = {}        # 音效名稱 → AudioStream
 var sfx_players: Array = []
 var sfx_idx := 0
@@ -108,6 +111,27 @@ func _ready() -> void:
 		_toggle_dev()
 	if args.has("--settings"):
 		_show_settings()
+	for a in args:
+		if a.begins_with("--level="):
+			start_level(int(a.get_slice("=", 1)))
+	if args.has("--check-levels"):
+		# 逐關載入檢查：每種動物數量剛好等於每欄格數、沒有超出格數的欄
+		var bad := 0
+		for l in range(1, MAX_LEVEL + 51):
+			start_level(l)
+			var cnt := {}
+			for c in cols:
+				if c.size() > cap:
+					bad += 1
+				for t in c:
+					cnt[t["t"]] = cnt.get(t["t"], 0) + 1
+			for k in cnt:
+				if cnt[k] != cap:
+					bad += 1
+			if cols.size() > 8 or slot_open < 1 or slot_open > 3:
+				bad += 1
+		print("check-levels bad=%d" % bad)
+		start_level(level if level <= MAX_LEVEL else 1)
 	if args.has("--audio-check"):
 		var ms = music_player.stream
 		print("audio-check sfx=%d music=%s loop_end=%s playing=%s" % [sfx.size(), ms != null, ms.loop_end if ms is AudioStreamWAV else -1, music_player.playing])
@@ -313,7 +337,9 @@ func _build_dev_panel() -> void:
 		["直接過關", _dev_win],
 		["下一關", func() -> void: start_level(level + 1)],
 		["上一關", func() -> void: start_level(max(1, level - 1))],
-		["解鎖第4格", func() -> void: _unlock_slot(3)],
+		["解鎖暫存格", func() -> void: _unlock_slot(slot_n - 1)],
+		["跳 10 關", func() -> void: start_level(level + 10)],
+		["跳到第 100 關", func() -> void: start_level(MAX_LEVEL)],
 		["製造快完成的欄", _dev_almost_complete],
 		["測試卡死畫面", _show_stuck],
 		["換一個隨機盤面", func() -> void: start_level(level, randi() % 1000000)],
@@ -326,7 +352,7 @@ func _build_dev_panel() -> void:
 	for it in items:
 		var b := Button.new()
 		b.text = it[0]
-		b.custom_minimum_size = Vector2(360, 42)
+		b.custom_minimum_size = Vector2(360, 37)
 		b.focus_mode = Control.FOCUS_NONE
 		b.add_theme_font_size_override("font_size", 18)
 		var cb: Callable = it[1]
@@ -354,7 +380,10 @@ func start_level(l: int, sd: int = -1) -> void:
 	slots = []
 	for k in SLOT_COUNT:
 		slots.append(null)
-	slot_unlocked = [true, true, true, false]
+	slot_n = min(SLOT_COUNT, slot_open + 1)
+	slot_unlocked = []
+	for k in SLOT_COUNT:
+		slot_unlocked.append(k < slot_open)
 	sel_col = -1
 	sel_slot = -1
 	history.clear()
@@ -377,41 +406,50 @@ func _drop_in() -> void:
 			t["wait"] = i * 0.045 + j * 0.03
 
 
-func _level_cfg() -> Array:
-	return LEVELS[min(level - 1, LEVELS.size() - 1)]
-
-
 func _new_tile(t: String, r: bool) -> Dictionary:
 	next_id += 1
 	return {"id": next_id, "t": t, "r": r, "off": Vector2.ZERO, "pop": 0.0}
 
 
 func _generate(sd: int) -> void:
-	var cfg := _level_cfg()
-	var types: int = cfg[0]
-	var n: int = cfg[1]
-	cap = cfg[2]
+	# 關卡盤面來自 level_data.gd（每關都經解題程式確認解得開）
+	var idx := level - 1
+	var flip_cols := false
+	if idx >= LevelData.DATA.size():
+		# 第 100 關之後：循環使用後 50 關的盤面，換一批動物、偶數輪左右對調
+		idx = 50 + (level - MAX_LEVEL - 1) % 50
+		flip_cols = ((level - MAX_LEVEL - 1) / 50) % 2 == 1
+	var parts: PackedStringArray = LevelData.DATA[idx].split(";")
+	var head: PackedStringArray = parts[0].split(",")
+	cap = int(head[0])
+	slot_open = int(head[1])
 	var rng := RandomNumberGenerator.new()
 	rng.seed = sd
 	var pool: Array = Art.KEYS.duplicate()
 	_shuffle(pool, rng)
-	var bag: Array = []
-	for i in types:
-		for c in cap:
-			bag.append(pool[i])
-	_shuffle(bag, rng)
+	var texts: Array = Array(parts[1].split("|"))
+	if flip_cols:
+		texts.reverse()
+	# 開發工具「換一個隨機盤面」會傳入自訂種子：同樣的方塊重新洗牌（不保證有解）
+	var custom := sd != level * 7919 + 17
+	var letters: Array = []
+	if custom:
+		for text in texts:
+			for ch in (text as String):
+				letters.append(ch)
+		_shuffle(letters, rng)
 	cols = []
-	var total := bag.size()
-	var idx := 0
-	for i in n:
-		var h: int = total / n + (1 if i < total % n else 0)
+	var li := 0
+	for text in texts:
 		var col: Array = []
-		for j in h:
-			var tile := _new_tile(bag[idx], rng.randf() < 0.12)
+		for ch in (text as String):
+			var c: String = letters[li] if custom else ch
+			li += 1
+			var low := c.to_lower()
+			var tile := _new_tile(pool[low.unicode_at(0) - 97], c != low)
 			if tile["r"]:
 				seen[tile["id"]] = true
 			col.append(tile)
-			idx += 1
 		cols.append(col)
 
 
@@ -447,7 +485,7 @@ func _tile_pos(i: int, j: int) -> Vector2:
 
 
 func _slot_rect(k: int) -> Rect2:
-	var total := SLOT_COUNT * SLOT_SIZE + (SLOT_COUNT - 1) * SLOT_GAP
+	var total := slot_n * SLOT_SIZE + (slot_n - 1) * SLOT_GAP
 	var x0 := (480.0 - total) / 2.0
 	return Rect2(x0 + k * (SLOT_SIZE + SLOT_GAP), SLOT_Y - SLOT_SIZE / 2.0, SLOT_SIZE, SLOT_SIZE)
 
@@ -732,7 +770,7 @@ func _gui_input(event: InputEvent) -> void:
 		return
 	var h0 := history.size()
 	var had := sel_col >= 0 or sel_slot >= 0
-	for k in SLOT_COUNT:
+	for k in slot_n:
 		if _slot_rect(k).grow(4).has_point(p):
 			_tap_slot(k)
 			_tap_sound(h0, had)
@@ -883,7 +921,7 @@ func _draw() -> void:
 				movers.append([t, p, tsize])
 				continue
 			_draw_tile(t, p, tsize, _pop_scale(t), sel_col == i and j >= c.size() - rl)
-	for k in SLOT_COUNT:
+	for k in slot_n:
 		var r := _slot_rect(k)
 		if not slot_unlocked[k]:
 			if Art.ui.has("slot_lock"):
@@ -1102,6 +1140,9 @@ func _show_dialog(title: String, msg: String, buttons: Array) -> void:
 
 
 func _show_win() -> void:
+	if level == MAX_LEVEL:
+		_show_dialog("恭喜全破！", "100 關全部完成，太厲害了！\n後面還有更多關卡等你挑戰", [["繼續挑戰", func() -> void: start_level(level + 1)]])
+		return
 	_show_dialog("過關！", "所有動物都排好了，好棒！", [["下一關", func() -> void: start_level(level + 1)]])
 
 
@@ -1109,8 +1150,8 @@ func _show_stuck() -> void:
 	var btns: Array = []
 	if not history.is_empty():
 		btns.append(["撤回一步", _on_undo])
-	if not slot_unlocked[3]:
-		btns.append(["解鎖第4格", func() -> void: _unlock_slot(3)])
+	if not slot_unlocked[slot_n - 1]:
+		btns.append(["解鎖暫存格", func() -> void: _unlock_slot(slot_n - 1)])
 	btns.append(["重新開始", _on_restart])
 	_show_dialog("卡住了", "沒有可以走的步了", btns)
 	_play("stuck")
@@ -1408,6 +1449,8 @@ func _start_tutorial() -> void:
 	slots = []
 	for k in SLOT_COUNT:
 		slots.append(null)
+	slot_open = 3
+	slot_n = 4
 	slot_unlocked = [true, true, true, false]
 	sel_col = -1
 	sel_slot = -1
@@ -1456,7 +1499,7 @@ func _draw_tutorial() -> void:
 	var is_info: bool = st.has("info")
 	var hole: Rect2
 	if is_info:
-		hole = _slot_rect(0).merge(_slot_rect(SLOT_COUNT - 1)).grow(10)
+		hole = _slot_rect(0).merge(_slot_rect(slot_n - 1)).grow(10)
 	else:
 		hole = _tube_rect(st["col"]).grow(8)
 		hole.position.y -= 26
