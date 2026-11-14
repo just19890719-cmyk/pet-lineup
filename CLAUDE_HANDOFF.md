@@ -33,7 +33,7 @@ Godot 4.7.2 製作的可愛動物「盲盒排序」益智遊戲（原創同類�
   - 「開發」按鈕只在除錯版顯示（`OS.is_debug_build()`），匯出的正式版看不到。
 
 - 2026-11-14 音效與音樂（全部由 `tools/gen_audio.py` 用程式合成，輸出 `assets/audio/*.wav`，無外部素材）：
-  - 14 個音效：pick 拿起、drop 放下、deny 不能放、flip 翻牌、clear 整欄消除（連續消除音調逐次升高，變數 `combo`）、win 過關、button 按鈕、undo 撤回、slot 暫存格、unlock 解鎖、stuck 卡住、pop 對話框、tick 開局掉落、step 教學說明步驟。
+  - 14 個音效：pick 拿起、drop 放下、deny 不能放、flip 翻牌、clear 整欄消除（連續消除音調逐次升高，變數 `combo`）、win 過關、button 按鈕、undo 撤回、slot 暫存格、unlock 解鎖、stuck 卡住、pop 對話框（第三版改用 card-slide-1，使用者指定）、tick 開局掉落、step 教學說明步驟。
   - bgm：8 小節循環曲（約 18 秒），音量 -12dB。
   - 程式入口：`_init_audio()`、`_play(名稱, 音調, 音量)`、`_tap_sound()`；改音色只要改 `gen_audio.py` 重跑再匯入。
   - 「設定」按鈕（遊戲左上、開始畫面右上）可分別開關音效與音樂，存檔鍵 `sfx_off`、`music_off`。

@@ -30,7 +30,7 @@ PICKS = {
     "slot":   ("interface-sounds", "glass_006", 0.40),         # 放進暫存格
     "unlock": ("interface-sounds", "maximize_004", 0.55),      # 解鎖
     "stuck":  ("music-jingles", "jingles_PIZZI01", 0.50),      # 卡住（撥弦，音往下）
-    "pop":    ("interface-sounds", "maximize_007", 0.40),      # 對話框彈出
+    "pop":    ("casino-audio", "card-slide-1", 0.45),          # 對話框彈出（使用者指定；原本的 maximize_007 不喜歡）
     "tick":   ("interface-sounds", "tick_004", 0.22),          # 開局方塊掉落
     "step":   ("interface-sounds", "toggle_002", 0.45),        # 教學確認
 }

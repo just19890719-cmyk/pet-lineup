@@ -19,7 +19,7 @@ Files:
   slot.wav <- interface-sounds/glass_006.ogg
   unlock.wav <- interface-sounds/maximize_004.ogg
   stuck.wav <- music-jingles/jingles_PIZZI01.ogg
-  pop.wav <- interface-sounds/maximize_007.ogg
+  pop.wav <- casino-audio/card-slide-1.ogg
   tick.wav <- interface-sounds/tick_004.ogg
   step.wav <- interface-sounds/toggle_002.ogg
   bgm.ogg <- island_0.ogg
