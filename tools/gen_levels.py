@@ -1,5 +1,5 @@
-"""產生 100 關的關卡資料：隨機發牌 → 用解題程式確認解得開並算難度分數 → 每關挑最貼近目標直線的盤面 → 寫成 scripts/level_data.gd
-用法：python tools/gen_levels.py
+"""產生 300 關的關卡資料：隨機發牌 → 用解題程式確認解得開並算難度分數 → 每關挑最貼近目標直線的盤面 → 寫成 scripts/level_data.gd
+用法：python tools/gen_levels.py 1 100（分段計算，可同時開幾段）→ 全部算完後 python tools/gen_levels.py merge
 每關格式："每欄格數,開放暫存格數;欄1|欄2|..."，字母代表動物種類，大寫 = 開局就翻開。
 """
 import os
@@ -9,13 +9,19 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 # ───────── 難度表（純直線） ─────────
+TOTAL = 300            # 總關卡數
 SCORE_FIRST = 25.0     # 第 1 關的目標難度分數
-SCORE_LAST = 200.0     # 第 100 關的目標難度分數
+SCORE_LAST = 200.0     # 最後一關的目標難度分數
+
+
+def progress(L):
+    """這一關在整條難度線上的位置，0 = 第 1 關，1 = 最後一關"""
+    return (L - 1) / float(TOTAL - 1)
 
 
 def target(L):
-    """每一關的目標難度分數：從第 1 關到第 100 關是一條直線"""
-    return SCORE_FIRST + (SCORE_LAST - SCORE_FIRST) * (L - 1) / 99.0
+    """每一關的目標難度分數：從第 1 關到最後一關是一條直線"""
+    return SCORE_FIRST + (SCORE_LAST - SCORE_FIRST) * progress(L)
 
 
 def score(steps, nodes):
@@ -26,10 +32,10 @@ def score(steps, nodes):
 
 def nominal(L):
     """這一關大概的盤面大小：(動物種類, 每欄格數, 開放暫存格, 開局翻開比例)"""
-    p = (L - 1) / 99.0
-    T = 4 if L <= 4 else 5 if L <= 18 else 6 if L <= 50 else 7
+    p = progress(L)
+    T = 4 if p <= 0.035 else 5 if p <= 0.175 else 6 if p <= 0.495 else 7
     cap = 6 + round(6 * p ** 0.75)
-    slots = 3 if L <= 60 else 2 if L <= 85 else 1
+    slots = 3 if p <= 0.6 else 2 if p <= 0.85 else 1
     return T, cap, slots, 0.40 - 0.32 * p
 
 
@@ -141,9 +147,18 @@ def solve(cols, cap, nslots, limit=40000):
 
 # ───────── 主程式 ─────────
 def main():
+    """python gen_levels.py 起 迄 → 算這一段並存成分段檔；python gen_levels.py merge → 合併成 level_data.gd"""
     import json
+    import sys
+    parts_dir = os.path.join(ROOT, "tools", "level_parts")
+    os.makedirs(parts_dir, exist_ok=True)
+    if len(sys.argv) >= 2 and sys.argv[1] == "merge":
+        merge(parts_dir)
+        return
+    first = int(sys.argv[1]) if len(sys.argv) >= 3 else 1
+    last = int(sys.argv[2]) if len(sys.argv) >= 3 else TOTAL
     lines, report = [], []
-    for L in range(1, 101):
+    for L in range(first, last + 1):
         T0, cap0, slots, reveal = nominal(L)
         want = target(L)
         rng = random.Random(L * 1000003)
@@ -155,7 +170,7 @@ def main():
                     n = T + spare
                     if n > 8:
                         continue
-                    for _ in range(5):
+                    for _ in range(int(os.environ.get("CANDS", "6"))):
                         board = deal(T, n, cap, rng)
                         if any(len(set(c)) == 1 and len(c) >= cap - 1 for c in board):
                             continue                 # 開局就幾乎排好一欄的不要
@@ -177,10 +192,26 @@ def main():
         report.append([L, T, n, cap, slots, round(want, 1), round(sc, 1), steps, nodes, tested])
         print("第 %3d 關  目標 %5.1f  實際 %5.1f  (%d 種 %d 欄 %d 格 暫存 %d，步數 %d，搜尋 %d，候選 %d)"
               % (L, want, sc, T, n, cap, slots, steps, nodes, tested), flush=True)
+    with open(os.path.join(parts_dir, "part_%03d_%03d.json" % (first, last)), "w", encoding="utf-8") as f:
+        json.dump({"lines": lines, "report": report}, f)
+    print("第 %d–%d 關完成" % (first, last))
+
+
+def merge(parts_dir):
+    import json
+    lines, report = [], []
+    for name in sorted(os.listdir(parts_dir)):
+        if name.startswith("part_") and name.endswith(".json"):
+            d = json.load(open(os.path.join(parts_dir, name), encoding="utf-8"))
+            lines += d["lines"]
+            report += d["report"]
+    assert [r[0] for r in report] == list(range(1, TOTAL + 1)), "分段檔沒有湊齊 1–%d 關" % TOTAL
+    boards = [l.split(";")[1].lower() for l in lines]
+    assert len(set(boards)) == len(boards), "有重複的盤面"
     out = os.path.join(ROOT, "scripts", "level_data.gd")
     with open(out, "w", encoding="utf-8", newline="\n") as f:
         f.write("extends RefCounted\n")
-        f.write("## 100 關的關卡資料，由 tools/gen_levels.py 產生（每一關都經解題程式確認解得開），請勿手改。\n")
+        f.write("## %d 關的關卡資料，由 tools/gen_levels.py 產生（每一關都經解題程式確認解得開、盤面互不重複），請勿手改。\n" % TOTAL)
         f.write('## 格式："每欄格數,開放暫存格數;欄1|欄2|..."，字母 = 動物種類，大寫 = 開局就翻開，每欄由下往上。\n\n')
         f.write("const DATA: Array[String] = [\n")
         f.write("\n".join(lines))

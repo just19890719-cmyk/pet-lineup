@@ -24,7 +24,8 @@ const TUT := [
 ]
 # [動物種類數, 欄數, 每欄容量]
 const LevelData := preload("res://scripts/level_data.gd")
-const MAX_LEVEL := 100
+const I18n := preload("res://scripts/i18n.gd")
+const MAX_LEVEL := 300
 
 var level: int = 1
 var cols: Array = []          # Array[Array[Dictionary]]，索引 0 = 最底
@@ -73,8 +74,23 @@ var no_ads := false             # 已買免廣告：不跳插頁廣告，求救�
 var undo_left := -1             # 這一關剩下的免費撤回次數；-1 = 無限
 var reveal_free := 0            # 這一關剩下的免費「翻問號」次數
 var ad_this_level := false      # 這一關玩家是否已主動看過廣告
-var wins_since_ad := 0
-var last_ad_ms := -1000000
+var last_ad_ms := 0
+var sys_font: Font              # 系統字型（最後的備援）
+var lang_fonts: Dictionary = {} # 內建字型："TC"/"SC"/"JP"/"KR" → FontFile
+var last_inter_ms := 0          # 上次過關廣告的時間
+var hint_steps_left := 0        # 這次提示還會自動接著給幾步
+var hint_was_free := false      # 這次提示用的是免費次數
+var dead_bonus_given := false   # 這一關已經送過「解不開」的補償撤回
+var paid_hint_used := 0         # 這一關用掉幾次非免費的提示（買斷玩家有每關上限）
+var paid_reveal_used := 0       # 這一關用掉幾次非免費的翻問號
+var hint_btn: Button
+var hint_free := 0              # 這一關剩下的免費提示次數
+var hint_busy := false          # 正在計算提示
+var hint_last: Dictionary = {}  # 上一次給出的提示
+var hint_plan: Array = []       # 記住的解法路線：[[走這步之前的局面, 這一步], ...]
+var hint: Dictionary = {}       # 目前顯示中的提示：{"k": "c"/"s"/"p", ...}；空 = 沒有
+var run_ready := false          # 啟動完成後才開始寫入關卡中途進度
+var has_resume := false         # 這次啟動有接續上次的盤面
 var slot_open := 3             # 這一關開局就能用的暫存格數（後面的關卡會變少）
 var slot_n := 4                 # 畫面上顯示的暫存格數 = 開放的 + 1 格可解鎖
 var sfx: Dictionary = {}        # 音效名稱 → AudioStream
@@ -93,11 +109,19 @@ func _ready() -> void:
 	var sf := SystemFont.new()
 	sf.font_names = PackedStringArray(["Microsoft JhengHei", "Noto Sans CJK TC", "Noto Sans TC", "PingFang TC", "Heiti TC"])
 	font = sf
-	# 內建字型（網頁版沒有系統字型）；缺字時退回系統字型
-	var ff := _load_font("res://assets/fonts/NotoSansTC-SemiBold-subset.ttf")
-	if ff != null:
-		ff.fallbacks = [sf]
-		font = ff
+	sys_font = sf
+	# 內建字型（網頁版沒有系統字型）：繁中、簡中、日文、韓文各一套，其餘語言用繁中那套裡的歐文字母
+	for code in ["TC", "SC", "JP", "KR"]:
+		var ff := _load_font("res://assets/fonts/NotoSans%s-SemiBold-subset.ttf" % code)
+		if ff != null:
+			lang_fonts[code] = ff
+	# 語言：存檔裡有選過就用選的，沒有就看系統語言
+	var saved_lang := _load_text("lang", "")
+	I18n.lang = I18n.LANGS.find(saved_lang) if I18n.LANGS.has(saved_lang) else I18n.detect(OS.get_locale())
+	for a0 in OS.get_cmdline_user_args():
+		if a0.begins_with("--lang="):   # 測試用：只影響這次執行
+			I18n.lang = max(0, I18n.LANGS.find(a0.get_slice("=", 1)))
+	_apply_lang_font()
 	_build_theme()
 	_build_styles()
 	_build_ui()
@@ -108,6 +132,10 @@ func _ready() -> void:
 	level = _load_level()
 	tut_done = _load_flag("tutorial_done")
 	start_level(level)
+	has_resume = _load_run()
+	run_ready = true
+	last_ad_ms = Time.get_ticks_msec()
+	last_inter_ms = last_ad_ms
 	# 測試用啟動參數（接在 -- 後面）：--skip-title 跳過開始畫面、--tutorial 直接進教學、--win 直接過關
 	var args := OS.get_cmdline_user_args()
 	if args.has("--tutorial"):
@@ -123,6 +151,35 @@ func _ready() -> void:
 	for a in args:
 		if a.begins_with("--level="):
 			start_level(int(a.get_slice("=", 1)))
+	if args.has("--language-dialog"):
+		_show_language()
+	if args.has("--no-ads"):
+		no_ads = true   # 只影響這次執行，不寫入存檔
+		_update_ui()
+	if args.has("--buyer-used-up"):
+		# 測試：買斷玩家這一關提示用完時的畫面
+		paid_hint_used = BUYER_HINT_PER_LEVEL
+		hint_free = 0
+		_update_ui()
+		_on_hint()
+	if args.has("--resume-check"):
+		var tiles := 0
+		for c in cols:
+			tiles += c.size()
+		print("resume-check resumed=%s level=%d tiles=%d history=%d undo_left=%d" % [has_resume, level, tiles, history.size(), undo_left])
+	if args.has("--hint"):
+		_run_hint()
+	if args.has("--auto-hint"):
+		# 自動照著提示走到過關，用來驗證提示每一步都走得通
+		var state := {"moves": 0, "done": false}
+		for a2 in args:
+			if a2.begins_with("--stop-at="):
+				state["stop_at"] = int(a2.get_slice("=", 1))
+		var at := Timer.new()
+		at.wait_time = 0.02 if args.has("--fast") else 0.12
+		at.autostart = true
+		at.timeout.connect(func() -> void: _auto_hint_step(state))
+		add_child(at)
 	if args.has("--ask-undo"):
 		undo_left = 0
 		_ask_more_undo()
@@ -150,7 +207,7 @@ func _ready() -> void:
 		start_level(level if level <= MAX_LEVEL else 1)
 	if args.has("--audio-check"):
 		var ms = music_player.stream
-		print("audio-check sfx=%d music=%s loop_end=%s playing=%s" % [sfx.size(), ms != null, ms.loop_end if ms is AudioStreamWAV else -1, music_player.playing])
+		print("audio-check sfx=%d music=%s type=%s loop=%s length=%.1f playing=%s" % [sfx.size(), ms != null, ms.get_class() if ms != null else "-", ms.loop if ms is AudioStreamOggVorbis else false, ms.get_length() if ms != null else 0.0, music_player.playing])
 	if args.has("--tut-auto"):
 		# 自動照著教學點，用來驗證七個步驟走得完
 		var tm := Timer.new()
@@ -163,6 +220,126 @@ func _ready() -> void:
 		add_child(tm)
 	if args.has("--win"):
 		_dev_win()
+
+
+## 翻譯：以繁體中文原文查表，查不到就顯示原文
+func T(s: String) -> String:
+	return I18n.t(s)
+
+
+## 依目前語言挑主要字型，其他字型與系統字型當備援
+func _apply_lang_font() -> void:
+	var want: String = I18n.FONT_OF[I18n.lang]
+	if not lang_fonts.has(want):
+		want = "TC"
+	if not lang_fonts.has(want):
+		font = sys_font
+	else:
+		var primary: FontFile = lang_fonts[want]
+		var fb: Array[Font] = []
+		for code in lang_fonts:
+			var f: FontFile = lang_fonts[code]
+			if f != primary:
+				f.fallbacks = []
+				fb.append(f)
+		fb.append(sys_font)
+		primary.fallbacks = fb
+		font = primary
+	if theme != null:
+		theme.default_font = font
+
+
+## 換語言：存檔、換字型、重畫所有文字
+func _set_lang(i: int) -> void:
+	I18n.lang = clampi(i, 0, I18n.LANGS.size() - 1)
+	_save_text("lang", I18n.LANGS[I18n.lang])
+	_apply_lang_font()
+	_update_ui()
+	if title_layer != null:
+		title_layer.queue_free()
+		title_layer = null
+		_show_title()
+	_show_settings()
+
+
+func _show_language() -> void:
+	_close_overlay()
+	_play("pop")
+	overlay = Control.new()
+	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	var dim := ColorRect.new()
+	dim.color = Color(0, 0, 0, 0.45)
+	dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	overlay.add_child(dim)
+	var panel := PanelContainer.new()
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 10)
+	panel.add_child(vb)
+	var tl := Label.new()
+	tl.text = T("語言")
+	tl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	tl.add_theme_font_size_override("font_size", 28)
+	tl.add_theme_color_override("font_color", Color("ff7a45"))
+	vb.add_child(tl)
+	var grid := GridContainer.new()
+	grid.columns = 2
+	grid.add_theme_constant_override("h_separation", 8)
+	grid.add_theme_constant_override("v_separation", 6)
+	vb.add_child(grid)
+	for i in I18n.LANGS.size():
+		var b := Button.new()
+		b.text = I18n.NATIVE[i]
+		b.custom_minimum_size = Vector2(176, 46)
+		b.focus_mode = Control.FOCUS_NONE
+		b.add_theme_font_size_override("font_size", 16)
+		if i == I18n.lang and Art.ui.has("btn_green"):
+			b.add_theme_stylebox_override("normal", _sbt("btn_green", Color.WHITE))
+			b.add_theme_stylebox_override("hover", _sbt("btn_green", Color.WHITE))
+			b.add_theme_color_override("font_outline_color", Color("2c7a2c"))
+		var idx := i
+		b.pressed.connect(func() -> void: _set_lang(idx))
+		_juice(b)
+		grid.add_child(b)
+	overlay.add_child(panel)
+	add_child(overlay)
+	panel.set_anchors_and_offsets_preset(Control.PRESET_CENTER, Control.PRESET_MODE_MINSIZE)
+	move_child(dev_panel, get_child_count() - 1)
+
+
+## 字太長時自動縮小字級，讓按鈕文字不會超出按鈕（各國語言長度差很多）
+func _fit_button(b: Button, base_size: int, max_w: float) -> void:
+	var sz := base_size
+	while sz > 10:
+		var widest := 0.0
+		for ln in b.text.split("\n"):
+			widest = max(widest, font.get_string_size(ln, HORIZONTAL_ALIGNMENT_LEFT, -1, sz).x)
+		if widest <= max_w:
+			break
+		sz -= 1
+	b.add_theme_font_size_override("font_size", sz)
+
+
+## 單行文字太寬時回傳縮小後的字級
+func _fit_size(text: String, base_size: int, max_w: float) -> int:
+	var w := font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, base_size).x
+	if w <= max_w:
+		return base_size
+	return max(10, int(floor(base_size * max_w / w)))
+
+
+func _load_text(key: String, fallback: String) -> String:
+	var cf := ConfigFile.new()
+	if cf.load(SAVE_PATH) != OK:
+		return fallback
+	return str(cf.get_value("progress", key, fallback))
+
+
+func _save_text(key: String, v: String) -> void:
+	var cf := ConfigFile.new()
+	cf.load(SAVE_PATH)
+	cf.set_value("progress", key, v)
+	cf.save(SAVE_PATH)
 
 
 func _load_font(path: String) -> FontFile:
@@ -324,13 +501,16 @@ func _make_button(text: String, pos: Vector2, sz: Vector2, cb: Callable, fsize: 
 func _build_ui() -> void:
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	level_label = _make_label("第 1 關", 30, Vector2(0, 16), 480, Color.WHITE, Color("a83a22"), 8)
-	hint_label = _make_label("點欄位拿起最上面同款動物，再點要放的欄位", 16, Vector2(0, 86), 480, Color("5a3d2b"), Color(1, 1, 1, 0.9), 4)
-	skip_btn = _make_button("跳過", Vector2(8, 14), Vector2(76, 44), func() -> void: _finish_tutorial(), 18)
+	hint_label = _make_label(T("點欄位拿起最上面同款動物，再點要放的欄位"), 16, Vector2(0, 86), 480, Color("5a3d2b"), Color(1, 1, 1, 0.9), 4)
+	skip_btn = _make_button(T("跳過"), Vector2(8, 14), Vector2(76, 44), func() -> void: _finish_tutorial(), 18)
 	skip_btn.visible = false
-	settings_btn = _make_button("設定", Vector2(8, 14), Vector2(76, 44), _show_settings, 18)
-	undo_btn = _make_button("撤回", Vector2(16, 776), Vector2(142, 58), _on_undo, 20)
-	reveal_btn = _make_button("翻問號", Vector2(169, 776), Vector2(142, 58), _on_reveal, 20)
-	restart_btn = _make_button("重新開始", Vector2(322, 776), Vector2(142, 58), _on_restart, 20)
+	settings_btn = _make_button(T("設定"), Vector2(8, 14), Vector2(76, 44), _show_settings, 18)
+	undo_btn = _make_button(T("撤回"), Vector2(10, 772), Vector2(109, 66), _on_undo, 17)
+	reveal_btn = _make_button(T("翻問號"), Vector2(127, 772), Vector2(109, 66), _on_reveal, 17)
+	hint_btn = _make_button(T("提示"), Vector2(244, 772), Vector2(109, 66), _on_hint, 17)
+	restart_btn = _make_button(T("重新開始"), Vector2(361, 772), Vector2(109, 66), _on_restart, 17)
+	for b in [undo_btn, reveal_btn, hint_btn, restart_btn]:
+		b.add_theme_constant_override("line_spacing", -4)
 	dev_btn = _make_button("開發", Vector2(396, 14), Vector2(76, 44), _toggle_dev, 18)
 	_build_dev_panel()
 	# 給玩家的正式版不顯示開發按鈕（從編輯器或執行遊戲.bat 開啟時仍然有）
@@ -356,7 +536,7 @@ func _build_dev_panel() -> void:
 		["上一關", func() -> void: start_level(max(1, level - 1))],
 		["解鎖暫存格", func() -> void: _unlock_slot(slot_n - 1)],
 		["跳 10 關", func() -> void: start_level(level + 10)],
-		["跳到第 100 關", func() -> void: start_level(MAX_LEVEL)],
+		["跳到最後一關", func() -> void: start_level(MAX_LEVEL)],
 		["製造快完成的欄", _dev_almost_complete],
 		["測試卡死畫面", _show_stuck],
 		["換一個隨機盤面", func() -> void: start_level(level, randi() % 1000000)],
@@ -367,7 +547,7 @@ func _build_dev_panel() -> void:
 		["重置求救次數", _dev_reset_helpers],
 		["切換免廣告", _dev_toggle_no_ads],
 		["模擬插頁廣告", _dev_fake_ad],
-		["關閉", func() -> void: pass],
+		["直接提示一步", _run_hint],
 	]
 	for it in items:
 		var b := Button.new()
@@ -393,11 +573,11 @@ func start_level(l: int, sd: int = -1) -> void:
 	level = max(1, l)
 	tut_active = false
 	combo = 0
-	_reset_helpers()
 	seen.clear()
 	if sd < 0:
 		sd = level * 7919 + 17
 	_generate(sd)
+	_reset_helpers()   # 要在發牌之後：免費撤回次數看這一關開放幾格暫存格
 	slots = []
 	for k in SLOT_COUNT:
 		slots.append(null)
@@ -438,8 +618,8 @@ func _generate(sd: int) -> void:
 	var flip_cols := false
 	if idx >= LevelData.DATA.size():
 		# 第 100 關之後：循環使用後 50 關的盤面，換一批動物、偶數輪左右對調
-		idx = 50 + (level - MAX_LEVEL - 1) % 50
-		flip_cols = ((level - MAX_LEVEL - 1) / 50) % 2 == 1
+		idx = 150 + (level - MAX_LEVEL - 1) % 150
+		flip_cols = ((level - MAX_LEVEL - 1) / 150) % 2 == 0
 	var parts: PackedStringArray = LevelData.DATA[idx].split(";")
 	var head: PackedStringArray = parts[0].split(",")
 	cap = int(head[0])
@@ -611,6 +791,7 @@ func _do_move_to_slot(k: int) -> void:
 func _after_move(targets: Array) -> void:
 	sel_col = -1
 	sel_slot = -1
+	hint = {}
 	_reveal_tops(true)
 	var combo_before := combo
 	for i in targets:
@@ -619,6 +800,9 @@ func _after_move(targets: Array) -> void:
 		combo = 0
 	_check_end()
 	_update_ui()
+	if hint_steps_left > 0 and not game_over and not tut_active:
+		hint_steps_left -= 1
+		_continue_hint()
 
 
 func _reveal_tops(anim: bool) -> void:
@@ -659,7 +843,7 @@ func _check_complete(i: int) -> void:
 		fx.append({"kind": "spark", "pos": Vector2(cx, tr.position.y + randf() * tr.size.y),
 			"vel": Vector2(cos(ang), sin(ang)) * randf_range(60, 160), "size": randf_range(10, 20),
 			"time": 0.0, "delay": randf() * 0.2, "dur": 0.7})
-	fx.append({"kind": "text", "pos": Vector2(cx, tr.position.y - 10), "text": "完成！",
+	fx.append({"kind": "text", "pos": Vector2(cx, tr.position.y - 10), "text": T("完成！"),
 		"time": 0.0, "delay": 0.1, "dur": 1.0})
 	cols[i] = []
 
@@ -754,6 +938,7 @@ func _on_undo() -> void:
 		return
 	if undo_left > 0:
 		undo_left -= 1
+	hint = {}
 	_play("undo")
 	var snap: Dictionary = history.pop_back()
 	cols = []
@@ -785,6 +970,8 @@ func _gui_input(event: InputEvent) -> void:
 	if not mb.pressed or mb.button_index != MOUSE_BUTTON_LEFT:
 		return
 	accept_event()
+	if hint_busy:
+		return
 	if dev_panel.visible:
 		dev_panel.visible = false
 		return
@@ -868,6 +1055,7 @@ func _unlock_slot(k: int) -> void:
 	if slot_unlocked[k]:
 		return
 	slot_unlocked[k] = true
+	_save_run()
 	_play("unlock")
 	var c := _slot_rect(k).get_center()
 	for s in 8:
@@ -955,9 +1143,12 @@ func _draw() -> void:
 				draw_set_transform(r.get_center(), 0.0, Vector2(bob, bob))
 				draw_texture_rect(Art.ui["slot_lock"], Rect2(-r.size / 2.0 - Vector2(3, 3), r.size + Vector2(6, 6)), false)
 				draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+				if not tut_active:
+					var tag := T("免費") if level <= HONEYMOON_LEVELS else _ad_text(T("看廣告"), T("解鎖"))
+					_draw_text_center(tag, Vector2(r.get_center().x, r.end.y + 20), 14, Color.WHITE, Color("5a3a28"))
 			else:
 				draw_style_box(sb_slot_locked, r)
-				_draw_text_center("解鎖", r.get_center() + Vector2(0, 7), 18, Color.WHITE, Color(0.16, 0.13, 0.22))
+				_draw_text_center(T("解鎖"), r.get_center() + Vector2(0, 7), 18, Color.WHITE, Color(0.16, 0.13, 0.22))
 			continue
 		if Art.ui.has("slot"):
 			draw_texture_rect(Art.ui["slot"], r.grow(3), false)
@@ -979,6 +1170,7 @@ func _draw() -> void:
 	for m in movers:
 		_draw_tile(m[0], m[1], m[2], 1.0, false)
 	_draw_fx()
+	_draw_hint()
 	_draw_tutorial()
 
 
@@ -1098,23 +1290,42 @@ func _draw_star(c: Vector2, r: float, col: Color) -> void:
 
 # ───────────────────────── UI / 對話框 ─────────────────────────
 func _update_ui() -> void:
-	level_label.text = "新手教學" if tut_active else "第 %d 關" % level
+	level_label.text = T("新手教學") if tut_active else T("第 %d 關") % level
 	hint_label.visible = level <= 2 and not tut_active
 	undo_btn.visible = not tut_active
 	restart_btn.visible = not tut_active
 	reveal_btn.visible = not tut_active
+	hint_btn.visible = not tut_active
 	reveal_btn.disabled = _hidden_tiles().is_empty()
+	hint_btn.disabled = game_over or hint_busy
+	# 按鈕第二行標出：剩幾次、免費，或要看廣告
 	if undo_left < 0:
-		undo_btn.text = "撤回"
+		undo_btn.text = T("撤回")
 	elif undo_left > 0:
-		undo_btn.text = "撤回 ×%d" % undo_left
+		undo_btn.text = T("撤回\n剩 %d 次") % undo_left
 	else:
-		undo_btn.text = "補撤回"
+		undo_btn.text = T("補撤回") + _ad_text(T("\n看廣告"), "")
+	# 提示與翻問號每關都有上限（看廣告的玩家和買斷的玩家一樣），第二行顯示還剩幾次
+	reveal_btn.text = T("翻問號") + _helper_line(reveal_free, _buyer_reveal_left())
+	hint_btn.text = T("提示") + _helper_line(hint_free, _buyer_hint_left())
 	skip_btn.visible = tut_active
 	settings_btn.visible = not tut_active
 	undo_btn.disabled = history.is_empty()
 	# 停用時把橘色字框換成深灰，灰底上才讀得清楚
-	undo_btn.add_theme_color_override("font_outline_color", Color("5e5148") if undo_btn.disabled else Color("b8601a"))
+	for b in [undo_btn, reveal_btn, hint_btn]:
+		b.add_theme_color_override("font_outline_color", Color("5e5148") if b.disabled else Color("b8601a"))
+	# 換語言後固定文字也要更新；各國文字長度不同，太長就自動縮小
+	restart_btn.text = T("重新開始")
+	skip_btn.text = T("跳過")
+	settings_btn.text = T("設定")
+	hint_label.text = T("點欄位拿起最上面同款動物，再點要放的欄位")
+	hint_label.add_theme_font_size_override("font_size", _fit_size(hint_label.text, 16, 410.0))
+	level_label.add_theme_font_size_override("font_size", _fit_size(level_label.text, 30, 190.0))
+	for b in [undo_btn, reveal_btn, hint_btn, restart_btn]:
+		_fit_button(b, 17, 88.0)
+	_fit_button(skip_btn, 18, 58.0)
+	_fit_button(settings_btn, 18, 58.0)
+	_save_run()
 
 
 func _close_overlay() -> void:
@@ -1140,7 +1351,7 @@ func _show_dialog(title: String, msg: String, buttons: Array) -> void:
 	var tl := Label.new()
 	tl.text = title
 	tl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	tl.add_theme_font_size_override("font_size", 32)
+	tl.add_theme_font_size_override("font_size", _fit_size(title, 32, 300.0))
 	tl.add_theme_color_override("font_color", Color("ff7a45"))
 	vb.add_child(tl)
 	if msg != "":
@@ -1155,6 +1366,7 @@ func _show_dialog(title: String, msg: String, buttons: Array) -> void:
 		btn.text = b[0]
 		btn.custom_minimum_size = Vector2(300, 56)
 		btn.focus_mode = Control.FOCUS_NONE
+		_fit_button(btn, 22, 268.0)
 		btn.pressed.connect(b[1])
 		_juice(btn)
 		vb.add_child(btn)
@@ -1175,21 +1387,27 @@ func _show_dialog(title: String, msg: String, buttons: Array) -> void:
 
 func _show_win() -> void:
 	if level == MAX_LEVEL:
-		_show_dialog("恭喜全破！", "100 關全部完成，太厲害了！\n後面還有更多關卡等你挑戰", [["繼續挑戰", _next_level]])
+		_show_dialog(T("恭喜全破！"), T("%d 關全部完成，太厲害了！\n後面還有更多關卡等你挑戰") % MAX_LEVEL, [[T("繼續挑戰"), _next_level]])
 		return
-	_show_dialog("過關！", "所有動物都排好了，好棒！", [["下一關", _next_level]])
+	_show_dialog(T("過關！"), T("所有動物都排好了，好棒！"), [[T("下一關"), _next_level]])
 
 
 func _show_stuck() -> void:
 	var btns: Array = []
 	if not history.is_empty():
-		btns.append(["撤回一步" if undo_left != 0 else "補撤回次數", _on_undo])
+		var ut := T("撤回一步")
+		if undo_left > 0:
+			ut = T("撤回一步（剩 %d 次）") % undo_left
+		elif undo_left == 0:
+			ut = T("補撤回次數") + _ad_text(T("（看廣告）"), "")
+		btns.append([ut, _on_undo])
 	if not slot_unlocked[slot_n - 1]:
-		btns.append(["解鎖暫存格", func() -> void: _request_unlock(slot_n - 1)])
+		var free_unlock := level <= HONEYMOON_LEVELS
+		btns.append([T("解鎖暫存格") + (T("（免費）") if free_unlock else _ad_text(T("（看廣告）"), "")), func() -> void: _request_unlock(slot_n - 1)])
 	if not _hidden_tiles().is_empty():
-		btns.append(["翻開問號", _on_reveal])
-	btns.append(["重新開始", _on_restart])
-	_show_dialog("卡住了", "沒有可以走的步了", btns)
+		btns.append([T("翻開問號") + (T("（免費）") if reveal_free > 0 else _ad_text(T("（看廣告）"), "")), _on_reveal])
+	btns.append([T("重新開始"), _on_restart])
+	_show_dialog(T("卡住了"), T("沒有可以走的步了"), btns)
 	_play("stuck")
 
 
@@ -1302,11 +1520,16 @@ func _init_audio() -> void:
 		add_child(pl)
 		sfx_players.append(pl)
 	music_player = AudioStreamPlayer.new()
-	music_player.volume_db = -12.0
+	music_player.volume_db = -9.0
 	add_child(music_player)
-	var bp := "res://assets/audio/bgm.wav"
+	# 背景音樂優先讀立體聲的 ogg，沒有才讀 wav
+	var bp := "res://assets/audio/bgm.ogg"
+	if not ResourceLoader.exists(bp):
+		bp = "res://assets/audio/bgm.wav"
 	if ResourceLoader.exists(bp):
 		var st = load(bp)
+		if st is AudioStreamOggVorbis:
+			st.loop = true
 		if st is AudioStreamWAV:
 			st.loop_mode = AudioStreamWAV.LOOP_FORWARD
 			st.loop_begin = 0
@@ -1323,15 +1546,16 @@ func _play(n: String, pitch: float = 1.0, vol_db: float = 0.0) -> void:
 	sfx_idx = (sfx_idx + 1) % sfx_players.size()
 	pl.stream = sfx[n]
 	pl.pitch_scale = pitch
-	pl.volume_db = vol_db
+	pl.volume_db = vol_db + 3.0   # 新版音效整體做得比較小聲、留了餘裕，這裡統一補回來
 	pl.play()
 
 
 func _show_settings() -> void:
-	_show_dialog("設定", "", [
-		["音效：%s" % ("開" if sfx_on else "關"), func() -> void: _set_sfx(not sfx_on)],
-		["音樂：%s" % ("開" if music_on else "關"), func() -> void: _set_music(not music_on)],
-		["關閉", _close_overlay],
+	_show_dialog(T("設定"), "", [
+		[T("音效：%s") % (T("開") if sfx_on else T("關")), func() -> void: _set_sfx(not sfx_on)],
+		[T("音樂：%s") % (T("開") if music_on else T("關")), func() -> void: _set_music(not music_on)],
+		[T("語言：%s") % I18n.NATIVE[I18n.lang], _show_language],
+		[T("關閉"), _close_overlay],
 	])
 
 
@@ -1357,10 +1581,14 @@ func _set_music(v: bool) -> void:
 const HONEYMOON_LEVELS := 10      # 前幾關：撤回無限、解鎖免費、不跳插頁廣告
 const UNDO_FREE_MID := 3          # 第 11–60 關每關免費撤回次數
 const UNDO_FREE_LATE := 5         # 第 61 關以後每關免費撤回次數
-const UNDO_PER_AD := 5            # 看一次廣告補幾次撤回
-const REVEAL_PER_USE := 3         # 翻問號一次翻開幾個
-const AD_EVERY_WINS := 3          # 每過幾關才可能跳一次插頁廣告
-const AD_MIN_GAP_MS := 120000     # 兩次廣告至少間隔（毫秒）
+const UNDO_PER_AD := [5, 8, 10]   # 看一次廣告補幾次撤回（暫存格 3 格 / 2 格 / 1 格的關卡）
+const REVEAL_PER_USE := [3, 5, 8] # 翻問號一次翻開幾個
+const HINT_STEPS := [1, 3, 5]     # 提示一次連給幾步
+const DEAD_BONUS_UNDO := 3        # 提示發現解不開時送幾次撤回（每關一次）
+const BUYER_HINT_PER_LEVEL := 3   # 每關提示上限（免費次數另計；看廣告與買斷的玩家都一樣），避免整關讓程式解完
+const BUYER_REVEAL_PER_LEVEL := 3 # 每關翻問號上限（同上）
+const AD_MIN_GAP_MS := 240000     # 過關廣告：距離上次廣告滿 4 分鐘才跳（毫秒）
+const HINT_NODE_LIMIT := 60000    # 提示最多試幾種局面，超過就放棄
 const FAKE_AD_SECONDS := 3
 
 
@@ -1368,10 +1596,58 @@ func _reset_helpers() -> void:
 	if level <= HONEYMOON_LEVELS:
 		undo_left = -1
 		reveal_free = 1
+		hint_free = 1
 	else:
-		undo_left = UNDO_FREE_MID if level <= 60 else UNDO_FREE_LATE
+		# 暫存格還有 3 格的關卡給 3 次，暫存格變少的後段關卡給 5 次
+		undo_left = UNDO_FREE_MID if slot_open >= 3 else UNDO_FREE_LATE
 		reveal_free = 0
+		hint_free = 0
 	ad_this_level = false
+	hint = {}
+	hint_plan = []
+	hint_last = {}
+	hint_steps_left = 0
+	dead_bonus_given = false
+	paid_hint_used = 0
+	paid_reveal_used = 0
+
+
+## 求救按鈕的第二行：免費次數優先顯示；其次是「廣告 剩 N」或買斷的「剩 N 次」；都沒了顯示用完
+func _helper_line(free_n: int, left_n: int) -> String:
+	if free_n > 0:
+		return T("\n免費 %d 次") % free_n
+	if left_n <= 0:
+		return T("\n用完了")
+	return _ad_text(T("\n廣告 剩 %d") % left_n, T("\n剩 %d 次") % left_n)
+
+
+## 這一關還能用幾次提示 / 翻問號（不含免費次數；看廣告的玩家和買斷的玩家都受這個上限）
+func _buyer_hint_left() -> int:
+	return max(0, BUYER_HINT_PER_LEVEL - paid_hint_used)
+
+
+func _buyer_reveal_left() -> int:
+	return max(0, BUYER_REVEAL_PER_LEVEL - paid_reveal_used)
+
+
+func _show_used_up(what: String, cap_n: int) -> void:
+	_show_dialog(T("%s用完了") % what, T("每一關最多用 %d 次\n下一關會補滿") % cap_n, [[T("知道了"), _close_overlay]])
+
+
+## 看完廣告（或買斷直接領）後才計一次
+func _paid_hint() -> void:
+	paid_hint_used += 1
+	_run_hint()
+
+
+func _paid_reveal() -> void:
+	paid_reveal_used += 1
+	_do_reveal()
+
+
+## 求救份量的級距：暫存格 3 格的關卡 0、2 格 1、1 格 2
+func _tier() -> int:
+	return clampi(3 - slot_open, 0, 2)
 
 
 func _hidden_tiles() -> Array:
@@ -1389,15 +1665,16 @@ func _ad_text(with_ad: String, without_ad: String) -> String:
 
 
 func _ask_more_undo() -> void:
-	_show_dialog("撤回用完了", _ad_text("看一段廣告，可以再撤回 %d 次" % UNDO_PER_AD, "再給你 %d 次撤回" % UNDO_PER_AD), [
-		[_ad_text("看廣告補 %d 次" % UNDO_PER_AD, "補 %d 次" % UNDO_PER_AD), func() -> void: _reward_ad(_grant_undo)],
-		["重新開始（免費）", _on_restart],
-		["不用了", _close_overlay],
+	var n: int = UNDO_PER_AD[_tier()]
+	_show_dialog(T("撤回用完了"), _ad_text(T("看一段廣告，可以再撤回 %d 次") % n, T("再給你 %d 次撤回") % n), [
+		[_ad_text(T("看廣告補 %d 次") % n, T("補 %d 次") % n), func() -> void: _reward_ad(_grant_undo)],
+		[T("重新開始（免費）"), _on_restart],
+		[T("不用了"), _close_overlay],
 	])
 
 
 func _grant_undo() -> void:
-	undo_left += UNDO_PER_AD
+	undo_left += UNDO_PER_AD[_tier()]
 	_update_ui()
 
 
@@ -1409,11 +1686,11 @@ func _dev_reset_helpers() -> void:
 func _dev_toggle_no_ads() -> void:
 	no_ads = not no_ads
 	_save_flag("no_ads", no_ads)
-	_show_dialog("免廣告：%s" % ("開" if no_ads else "關"), "", [["知道了", _close_overlay]])
+	_show_dialog("免廣告：%s" % (T("開") if no_ads else T("關")), "", [[T("知道了"), _close_overlay]])
 
 
 func _dev_fake_ad() -> void:
-	_fake_ad("過關廣告", _update_ui)
+	_fake_ad(T("過關廣告"), _update_ui)
 
 
 func _request_unlock(k: int) -> void:
@@ -1422,9 +1699,9 @@ func _request_unlock(k: int) -> void:
 	if tut_active or level <= HONEYMOON_LEVELS:
 		_unlock_slot(k)
 		return
-	_show_dialog("解鎖暫存格", _ad_text("看一段廣告，這一關多一格暫存格", "這一關多一格暫存格"), [
-		[_ad_text("看廣告解鎖", "解鎖"), func() -> void: _reward_ad(func() -> void: _unlock_slot(k))],
-		["不用了", _close_overlay],
+	_show_dialog(T("解鎖暫存格"), _ad_text(T("看一段廣告，這一關多一格暫存格"), T("這一關多一格暫存格")), [
+		[_ad_text(T("看廣告解鎖"), T("解鎖")), func() -> void: _reward_ad(func() -> void: _unlock_slot(k))],
+		[T("不用了"), _close_overlay],
 	])
 
 
@@ -1436,16 +1713,20 @@ func _on_reveal() -> void:
 		_close_overlay()
 		_do_reveal()
 		return
-	_show_dialog("翻開問號", _ad_text("看一段廣告，隨機翻開 %d 個問號" % REVEAL_PER_USE, "隨機翻開 %d 個問號" % REVEAL_PER_USE), [
-		[_ad_text("看廣告翻開", "翻開"), func() -> void: _reward_ad(_do_reveal)],
-		["不用了", _close_overlay],
+	if _buyer_reveal_left() <= 0:
+		_show_used_up(T("翻問號"), BUYER_REVEAL_PER_LEVEL)
+		return
+	var n: int = REVEAL_PER_USE[_tier()]
+	_show_dialog(T("翻開問號"), _ad_text(T("看一段廣告，隨機翻開 %d 個問號") % n, T("隨機翻開 %d 個問號") % n), [
+		[_ad_text(T("看廣告翻開"), T("翻開")), func() -> void: _reward_ad(_paid_reveal)],
+		[T("不用了"), _close_overlay],
 	])
 
 
 func _do_reveal() -> void:
 	var hidden := _hidden_tiles()
 	hidden.shuffle()
-	for n in min(REVEAL_PER_USE, hidden.size()):
+	for n in min(REVEAL_PER_USE[_tier()], hidden.size()):
 		var t: Dictionary = hidden[n]
 		t["r"] = true
 		t["pop"] = POP_TIME
@@ -1461,17 +1742,18 @@ func _reward_ad(reward: Callable) -> void:
 		reward.call()
 		return
 	ad_this_level = true
-	_fake_ad("獎勵廣告", reward)
+	_fake_ad(T("獎勵廣告"), reward)
 
 
 ## 過關後進下一關，符合條件時先跳插頁廣告
 func _next_level() -> void:
 	var nxt := level + 1
-	wins_since_ad += 1
-	var due := not no_ads and level > HONEYMOON_LEVELS and wins_since_ad >= AD_EVERY_WINS \
-		and not ad_this_level and Time.get_ticks_msec() - last_ad_ms >= AD_MIN_GAP_MS
+	# 看時間：距離上次「過關廣告」（或開啟遊戲）滿 AD_MIN_GAP_MS 就跳，不管這一關有沒有看過求救廣告
+	var due := not no_ads and level > HONEYMOON_LEVELS \
+		and Time.get_ticks_msec() - last_inter_ms >= AD_MIN_GAP_MS
 	if due:
-		_fake_ad("過關廣告", func() -> void: start_level(nxt))
+		last_inter_ms = Time.get_ticks_msec()
+		_fake_ad(T("過關廣告"), func() -> void: start_level(nxt))
 	else:
 		start_level(nxt)
 
@@ -1481,7 +1763,6 @@ func _fake_ad(kind: String, then: Callable) -> void:
 	if ad_layer != null:
 		return
 	_close_overlay()
-	wins_since_ad = 0
 	last_ad_ms = Time.get_ticks_msec()
 	ad_layer = Control.new()
 	ad_layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -1494,8 +1775,8 @@ func _fake_ad(kind: String, then: Callable) -> void:
 	ad_layer.add_child(bg)
 	var texts := [
 		[kind, 34, 300.0, Color("ffd34d")],
-		["這是測試用的假廣告", 20, 360.0, Color.WHITE],
-		["正式版會在這裡播放真的廣告", 18, 394.0, Color(1, 1, 1, 0.7)],
+		[T("這是測試用的假廣告"), 20, 360.0, Color.WHITE],
+		[T("正式版會在這裡播放真的廣告"), 18, 394.0, Color(1, 1, 1, 0.7)],
 	]
 	for it in texts:
 		var l := _make_label(it[0], it[1], Vector2(0, it[2]), 480, it[3], Color(0, 0, 0, 0.6), 4)
@@ -1513,6 +1794,507 @@ func _fake_ad(kind: String, then: Callable) -> void:
 		ad_layer = null
 		layer.queue_free()
 		then.call())
+
+
+# ───────────────────────── 關卡中途進度（關掉再開可接著玩） ─────────────────────────
+const RUN_HISTORY_KEEP := 20      # 接續後最多還能撤回幾步
+
+
+func _run_tile_code(t: Dictionary, idx_of: Dictionary, types: Array) -> String:
+	if not idx_of.has(t["id"]):
+		idx_of[t["id"]] = idx_of.size()
+		types.append(char(97 + Art.KEYS.find(t["t"])))
+	return "%02d%s" % [idx_of[t["id"]], "1" if (t["r"] or seen.has(t["id"])) else "0"]
+
+
+func _run_encode(snap_cols: Array, snap_slots: Array, idx_of: Dictionary, types: Array) -> String:
+	var parts: Array = []
+	for c in snap_cols:
+		var s := ""
+		for t in c:
+			s += _run_tile_code(t, idx_of, types)
+		parts.append(s)
+	var sl: Array = []
+	for t in snap_slots:
+		sl.append("-" if t == null else _run_tile_code(t, idx_of, types))
+	return "|".join(parts) + ";" + ",".join(sl)
+
+
+func _save_run() -> void:
+	if not run_ready:
+		return
+	var cf := ConfigFile.new()
+	cf.load(SAVE_PATH)
+	if tut_active or game_over or cols.is_empty():
+		if cf.has_section("run"):
+			cf.erase_section("run")
+			cf.save(SAVE_PATH)
+		return
+	var idx_of := {}
+	var types: Array = []
+	var cur := _run_encode(cols, slots, idx_of, types)
+	var hist: Array = []
+	for i in range(max(0, history.size() - RUN_HISTORY_KEEP), history.size()):
+		hist.append(_run_encode(history[i]["cols"], history[i]["slots"], idx_of, types))
+	if idx_of.size() > 99:
+		return
+	cf.set_value("run", "level", level)
+	cf.set_value("run", "types", "".join(types))
+	cf.set_value("run", "cur", cur)
+	cf.set_value("run", "hist", hist)
+	cf.set_value("run", "unlocked", slot_unlocked)
+	cf.set_value("run", "undo_left", undo_left)
+	cf.set_value("run", "reveal_free", reveal_free)
+	cf.set_value("run", "hint_free", hint_free)
+	cf.set_value("run", "paid_hint_used", paid_hint_used)
+	cf.set_value("run", "paid_reveal_used", paid_reveal_used)
+	cf.set_value("run", "dead_bonus_given", dead_bonus_given)
+	cf.set_value("run", "ad_this_level", ad_this_level)
+	cf.save(SAVE_PATH)
+
+
+func _run_decode(text: String, types: String, ids: Array, full: bool) -> Dictionary:
+	var halves := text.split(";")
+	var out_cols: Array = []
+	for part in halves[0].split("|"):
+		var col: Array = []
+		for i in range(0, part.length(), 3):
+			col.append(_run_tile(part.substr(i, 3), types, ids, full))
+		out_cols.append(col)
+	var out_slots: Array = []
+	for part in halves[1].split(","):
+		out_slots.append(null if part == "-" else _run_tile(part, types, ids, full))
+	return {"cols": out_cols, "slots": out_slots}
+
+
+func _run_tile(code: String, types: String, ids: Array, full: bool) -> Dictionary:
+	var idx := int(code.substr(0, 2))
+	var d := {"id": ids[idx], "t": Art.KEYS[types.unicode_at(idx) - 97], "r": code[2] == "1"}
+	if full:
+		d["off"] = Vector2.ZERO
+		d["pop"] = 0.0
+	return d
+
+
+## 讀回上次沒玩完的盤面；要在 start_level(level) 之後呼叫。成功回傳 true
+func _load_run() -> bool:
+	var cf := ConfigFile.new()
+	if cf.load(SAVE_PATH) != OK or not cf.has_section_key("run", "cur"):
+		return false
+	if int(cf.get_value("run", "level", -1)) != level:
+		return false
+	var types: String = str(cf.get_value("run", "types", ""))
+	var cur_text: String = str(cf.get_value("run", "cur", ""))
+	var unlocked = cf.get_value("run", "unlocked", [])
+	if types == "" or cur_text.count(";") != 1 or cur_text.split(";")[0].split("|").size() != cols.size():
+		return false
+	if not (unlocked is Array) or unlocked.size() != SLOT_COUNT:
+		return false
+	var ids: Array = []
+	for i in types.length():
+		next_id += 1
+		ids.append(next_id)
+	var cur := _run_decode(cur_text, types, ids, true)
+	if cur["slots"].size() != SLOT_COUNT:
+		return false
+	cols = cur["cols"]
+	slots = cur["slots"]
+	history = []
+	for h in cf.get_value("run", "hist", []):
+		history.append(_run_decode(str(h), types, ids, false))
+	seen.clear()
+	for c in cols:
+		for t in c:
+			if t["r"]:
+				seen[t["id"]] = true
+	slot_unlocked = unlocked
+	undo_left = int(cf.get_value("run", "undo_left", undo_left))
+	reveal_free = int(cf.get_value("run", "reveal_free", reveal_free))
+	hint_free = int(cf.get_value("run", "hint_free", hint_free))
+	paid_hint_used = int(cf.get_value("run", "paid_hint_used", 0))
+	paid_reveal_used = int(cf.get_value("run", "paid_reveal_used", 0))
+	dead_bonus_given = bool(cf.get_value("run", "dead_bonus_given", false))
+	ad_this_level = bool(cf.get_value("run", "ad_this_level", false))
+	sel_col = -1
+	sel_slot = -1
+	fx.clear()
+	game_over = false
+	_layout()
+	_update_ui()
+	return true
+
+
+# ───────────────────────── 提示一步 ─────────────────────────
+func _on_hint() -> void:
+	if game_over or hint_busy or tut_active:
+		return
+	if hint_free > 0:
+		hint_free -= 1
+		hint_was_free = true
+		_close_overlay()
+		_run_hint()
+		return
+	hint_was_free = false
+	if _buyer_hint_left() <= 0:
+		_show_used_up(T("提示"), BUYER_HINT_PER_LEVEL)
+		return
+	var n: int = HINT_STEPS[_tier()]
+	var with_ad := T("看一段廣告，告訴你下一步怎麼走") if n == 1 else T("看一段廣告，告訴你接下來 %d 步怎麼走") % n
+	var without_ad := T("告訴你下一步怎麼走") if n == 1 else T("告訴你接下來 %d 步怎麼走") % n
+	_show_dialog(T("提示"), _ad_text(with_ad, without_ad), [
+		[_ad_text(T("看廣告拿提示"), T("拿提示")), func() -> void: _reward_ad(_paid_hint)],
+		[T("不用了"), _close_overlay],
+	])
+
+
+func _run_hint() -> void:
+	if hint_busy or game_over or tut_active:
+		return
+	hint_busy = true
+	hint = {}
+	_update_ui()
+	var tip := _make_label(T("想一下…"), 22, Vector2(0, 92), 480, Color.WHITE, Color("5a3a28"), 6)
+	var lv := level
+	var hs := history.size()
+	var res: Dictionary = await _solve_hint()
+	tip.queue_free()
+	hint_busy = false
+	if lv != level or hs != history.size() or game_over:
+		_update_ui()
+		return
+	hint_steps_left = 0
+	if res.is_empty() or res.get("fail", "") == "none":
+		# 解不開：這次提示不算（免費次數還回去），並送幾次撤回讓玩家退回去（每關一次）
+		if hint_was_free:
+			hint_free += 1
+		elif paid_hint_used > 0:
+			paid_hint_used -= 1
+		var msg := T("照現在的排法已經過不了關\n建議撤回幾步，或重新開始")
+		if not dead_bonus_given and undo_left >= 0:
+			dead_bonus_given = true
+			undo_left += DEAD_BONUS_UNDO
+			msg = T("照現在的排法已經過不了關\n送你 %d 次撤回，退回去再試試") % DEAD_BONUS_UNDO
+		_show_dialog(T("這樣排解不開了"), msg, [
+			[T("撤回一步"), _on_undo], [T("重新開始"), _on_restart], [T("知道了"), _close_overlay]])
+	elif res.has("fail"):
+		hint_free += 1   # 沒算出來，這次不算（還一次免費提示）
+		_show_dialog(T("想不出來"), T("這個局面太複雜了\n這次提示不算，還你一次免費提示"), [[T("知道了"), _close_overlay]])
+	else:
+		hint = res
+		hint_steps_left = HINT_STEPS[_tier()] - 1
+		_play("step")
+	hint_was_free = false
+	_update_ui()
+
+
+## 提示連給幾步時，玩家走完一步後自動接著標出下一步（不另外收費）
+func _continue_hint() -> void:
+	if hint_busy or game_over or tut_active:
+		return
+	hint_busy = true
+	var lv := level
+	var hs := history.size()
+	var res: Dictionary = await _solve_hint()
+	hint_busy = false
+	if lv != level or hs != history.size() or game_over or res.is_empty() or res.has("fail"):
+		hint_steps_left = 0
+	else:
+		hint = res
+	_update_ui()
+
+
+func _hint_letter(t: Dictionary) -> String:
+	return char(97 + Art.KEYS.find(t["t"]))
+
+
+## 欄位字串最上面那一格一定是翻開的（大寫）
+func _top_up(col: String) -> String:
+	if col == "":
+		return col
+	var n := col.length()
+	return col.substr(0, n - 1) + col[n - 1].to_upper()
+
+
+## 目前局面轉成解題用的字串：每欄由下往上，一個字母一隻動物（不分翻開與否，跟 tools/gen_levels.py 同一個模型）
+func _hint_state() -> Array:
+	var c0: Array = []
+	for c in cols:
+		var s := ""
+		for t in c:
+			s += _hint_letter(t)
+		c0.append(s)
+	var sl: Array = []
+	var nslots := 0
+	for k in slot_n:
+		if slot_unlocked[k]:
+			nslots += 1
+			if slots[k] != null:
+				sl.append(_hint_letter(slots[k]))
+	sl.sort()
+	return [c0, "".join(sl), nslots]
+
+
+func _hint_key(c: Array, s: String) -> String:
+	var sorted_c := c.duplicate()
+	sorted_c.sort()
+	return "|".join(sorted_c) + ";" + s
+
+
+## 找出下一步提示。先看記住的解法路線還能不能用（玩家照著走就沿用，才不會前後矛盾），不行才重算。
+## 回傳第一步：{"k":"c","a":來源欄,"b":目標欄}、{"k":"s","t":動物,"b":目標欄}、{"k":"p","a":來源欄}
+## 解不開回傳 {"fail":"none"}，超過搜尋上限回傳 {"fail":"limit"}
+func _solve_hint() -> Dictionary:
+	var st := _hint_state()
+	var c0: Array = st[0]
+	var s0: String = st[1]
+	var nslots: int = st[2]
+	var real_key := "|".join(c0) + ";" + s0   # 不排序：欄的位置也要一樣，記住的步驟才對得上
+	for i in hint_plan.size():
+		if hint_plan[i][0] == real_key:
+			hint_plan = hint_plan.slice(i)
+			hint_last = hint_plan[0][1]
+			return hint_last
+	# 解題程式把一整串同款當成一步，但遊戲裡問號要翻開才搬得動，所以一步可能要分幾次搬
+	if not hint_plan.is_empty() and hint_last.get("k", "") == "c":
+		var ca: String = c0[hint_last["a"]]
+		var cb: String = c0[hint_last["b"]]
+		if ca != "" and cb != "" and cb.length() < cap and ca[ca.length() - 1] == cb[cb.length() - 1]:
+			return hint_last
+	hint_plan = []
+	hint_last = {}
+	# 深度優先搜尋；每個節點記父節點與走法，找到解後回頭串出整條路線
+	var node_par: Array = [-1]
+	var node_move: Array = [{}]
+	var node_real: Array = [real_key]
+	var stack: Array = [[c0, s0, 0]]
+	var visited := {}
+	var count := 0
+	while not stack.is_empty():
+		var it: Array = stack.pop_back()
+		var c: Array = it[0]
+		var s: String = it[1]
+		var ni: int = it[2]
+		var clear := s == ""
+		if clear:
+			for x in c:
+				if x != "":
+					clear = false
+					break
+		if clear:
+			var path: Array = []
+			var cur := ni
+			while node_par[cur] >= 0:
+				path.append([node_real[node_par[cur]], node_move[cur]])
+				cur = node_par[cur]
+			path.reverse()
+			hint_plan = path
+			hint_last = {} if path.is_empty() else path[0][1]
+			return hint_last
+		var key := _hint_key(c, s)
+		if visited.has(key):
+			continue
+		visited[key] = true
+		count += 1
+		if count > HINT_NODE_LIMIT:
+			return {"fail": "limit"}
+		if count % 250 == 0:
+			await get_tree().process_frame
+		var mv := _sim_moves(c, s, nslots)
+		for idx in range(mv.size() - 1, -1, -1):
+			var m: Array = mv[idx]
+			node_par.append(ni)
+			node_move.append(m[3])
+			node_real.append("|".join(m[1]) + ";" + m[2])
+			stack.append([m[1], m[2], node_par.size() - 1])
+	return {"fail": "none"}
+
+
+## 列出某個局面所有可走的步，依「越像好棋越前面」排序。
+## 順序必須跟 tools/gen_levels.py 的 moves() 完全一樣（同優先度維持產生順序），
+## 這樣每一關從開局搜尋的節點數才會跟產生關卡時相同，保證在上限內算得出來。
+func _sim_moves(c: Array, s: String, nslots: int) -> Array:
+	var out: Array = []
+	var n := c.size()
+	for i in n:
+		var a: String = c[i]
+		if a == "":
+			continue
+		var al := a.length()
+		var x := a[al - 1]
+		var r := 1
+		while r < al and a[al - 1 - r] == x:
+			r += 1
+		var seen_empty := false
+		for j in n:
+			if j == i:
+				continue
+			var b: String = c[j]
+			if b.length() >= cap:
+				continue
+			var pri := 0
+			if b != "":
+				if b[b.length() - 1] != x:
+					continue
+			else:
+				if r == al or seen_empty:
+					continue
+				seen_empty = true
+				pri = 3
+			var m: int = min(r, cap - b.length())
+			var nc := c.duplicate()
+			nc[i] = a.substr(0, al - m)
+			var nb := b + x.repeat(m)
+			nc[j] = "" if (nb.length() == cap and nb == x.repeat(cap)) else nb
+			out.append([pri, nc, s, {"k": "c", "a": i, "b": j}])
+	var done := {}
+	for si in s.length():
+		var x2 := s[si]
+		if done.has(x2):
+			continue
+		done[x2] = true
+		var seen_empty2 := false
+		for j in n:
+			var b2: String = c[j]
+			if b2.length() >= cap:
+				continue
+			var pri2 := 1
+			if b2 != "":
+				if b2[b2.length() - 1] != x2:
+					continue
+			else:
+				if seen_empty2:
+					continue
+				seen_empty2 = true
+				pri2 = 4
+			var nc2 := c.duplicate()
+			var nb2 := b2 + x2
+			nc2[j] = "" if (nb2.length() == cap and nb2 == x2.repeat(cap)) else nb2
+			out.append([pri2, nc2, s.substr(0, si) + s.substr(si + 1), {"k": "s", "t": x2, "b": j}])
+	if s.length() < nslots:
+		for i in n:
+			var a3: String = c[i]
+			if a3 == "":
+				continue
+			var al3 := a3.length()
+			var good := false
+			if al3 > 1:
+				var under := a3[al3 - 2]
+				for j in n:
+					if j != i and c[j] != "" and (c[j] as String)[(c[j] as String).length() - 1] == under:
+						good = true
+						break
+			var nc3 := c.duplicate()
+			nc3[i] = a3.substr(0, al3 - 1)
+			var chars: Array = []
+			for ch in s:
+				chars.append(ch)
+			chars.append(a3[al3 - 1])
+			chars.sort()
+			out.append([5 if good else 6, nc3, "".join(chars), {"k": "p", "a": i}])
+	var ordered: Array = []
+	for pri_level in 7:
+		for m2 in out:
+			if m2[0] == pri_level:
+				ordered.append(m2)
+	return ordered
+
+
+## 測試用：有提示就照著點，沒提示就要一個
+func _auto_hint_step(state: Dictionary) -> void:
+	if state["done"]:
+		get_tree().quit()
+		return
+	if hint_busy:
+		return
+	if game_over:
+		state["done"] = true
+		print("auto-hint 過關 level=%d moves=%d" % [level, state["moves"]])
+		return
+	if overlay != null:
+		state["done"] = true
+		print("auto-hint 中斷（跳出對話框） level=%d moves=%d" % [level, state["moves"]])
+		return
+	if hint.is_empty():
+		_run_hint()
+		return
+	var h := hint
+	var limit: int = state.get("stop_at", -1)
+	state["moves"] += 1
+	if h["k"] == "c":
+		sel_col = -1
+		sel_slot = -1
+		_tap_col(h["a"])
+		_tap_col(h["b"])
+	elif h["k"] == "p":
+		sel_col = -1
+		sel_slot = -1
+		_tap_col(h["a"])
+		for k in slot_n:
+			if slot_unlocked[k] and slots[k] == null:
+				_tap_slot(k)
+				break
+	else:
+		sel_col = -1
+		sel_slot = -1
+		for k in slot_n:
+			if slots[k] != null and _hint_letter(slots[k]) == h["t"]:
+				_tap_slot(k)
+				break
+		_tap_col(h["b"])
+	hint = {}
+	if limit > 0 and state["moves"] >= limit:
+		state["done"] = true
+		print("auto-hint 停在第 %d 步" % state["moves"])
+
+
+func _draw_hint() -> void:
+	if hint.is_empty() or game_over or tut_active:
+		return
+	var src := Rect2()
+	var dst := Rect2()
+	var tip := Vector2.ZERO
+	var kind: String = hint["k"]
+	if kind == "s":
+		var found := -1
+		for k in slot_n:
+			if slots[k] != null and _hint_letter(slots[k]) == hint["t"]:
+				found = k
+				break
+		if found < 0:
+			return
+		src = _slot_rect(found).grow(6)
+		tip = src.get_center() + Vector2(4, 6)
+	else:
+		var a: int = hint["a"]
+		if a >= cols.size() or cols[a].is_empty():
+			return
+		src = _tube_rect(a).grow(6)
+		tip = _tile_pos(a, cols[a].size() - 1) + Vector2(4, 8)
+	if kind == "p":
+		var free := -1
+		for k in slot_n:
+			if slot_unlocked[k] and slots[k] == null:
+				free = k
+				break
+		if free < 0:
+			return
+		dst = _slot_rect(free).grow(6)
+	else:
+		dst = _tube_rect(hint["b"]).grow(6)
+	var pulse := 2.0 + 3.0 * (0.5 + 0.5 * sin(clock * 5.0))
+	draw_style_box(sb_hole, src.grow(pulse))
+	draw_style_box(sb_hole, dst.grow(pulse))
+	var marks := [[src, "1"], [dst, "2"]]
+	for mk in marks:
+		var rc: Rect2 = mk[0]
+		var p := Vector2(rc.get_center().x, rc.position.y - 4)
+		draw_circle(p, 14.0, Color("ffd34d"))
+		draw_arc(p, 14.0, 0, TAU, 24, Color("5a3a28"), 2.0, true)
+		_draw_text_center(mk[1], p + Vector2(0, 7), 19, Color("5a3a28"), Color("ffd34d"))
+	tip.y += 8.0 * (0.5 + 0.5 * sin(clock * 6.0))
+	if Art.ui.has("hand"):
+		var hs := Vector2(58, 80)
+		draw_texture_rect(Art.ui["hand"], Rect2(tip - Vector2(hs.x * 0.3, 0), hs), false)
 
 
 # ───────────────────────── 彩帶 ─────────────────────────
@@ -1548,13 +2330,15 @@ func _show_title() -> void:
 		cr.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 		title_layer.add_child(cr)
 	# 標題
-	if Art.ui.has("logo"):
+	# 標題圖是中文字，只有中文語系用圖；其他語言先用文字顯示翻譯後的名稱
+	if Art.ui.has("logo") and I18n.lang <= 1:
 		var logo := _title_pic("logo", Rect2(24, 120, 432, 130))
 		var lt := logo.create_tween().set_loops()
 		lt.tween_property(logo, "position:y", 132.0, 1.5).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 		lt.tween_property(logo, "position:y", 120.0, 1.5).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 	else:
-		var tl := _make_label("萌寵排排站", 56, Vector2(0, 140), 480, Color("ffb020"), Color("5a3a28"), 12)
+		var title_text := T("萌寵排排站")
+		var tl := _make_label(title_text, _fit_size(title_text, 60, 430.0), Vector2(0, 140), 480, Color("ffb020"), Color("5a3a28"), 14)
 		remove_child(tl)
 		title_layer.add_child(tl)
 	# 動物主視覺（坐在下方草地上）
@@ -1565,7 +2349,7 @@ func _show_title() -> void:
 		ht.tween_property(hero, "scale", Vector2(1.02, 0.97), 0.9).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 		ht.tween_property(hero, "scale", Vector2(1.0, 1.0), 0.9).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 	# 開始按鈕
-	var sb := _make_button("開始遊戲", Vector2(105, 380), Vector2(270, 86), _on_title_start, 32)
+	var sb := _make_button(T("開始遊戲"), Vector2(105, 380), Vector2(270, 86), _on_title_start, 32)
 	remove_child(sb)
 	title_layer.add_child(sb)
 	if Art.ui.has("btn_green"):
@@ -1574,16 +2358,21 @@ func _show_title() -> void:
 		sb.add_theme_stylebox_override("pressed", _sbt("btn_green", Color(0.86, 0.86, 0.86)))
 		sb.add_theme_color_override("font_outline_color", Color("2c7a2c"))
 		sb.add_theme_constant_override("outline_size", 8)
-	var stb := _make_button("設定", Vector2(396, 14), Vector2(76, 44), _show_settings, 18)
+	_fit_button(sb, 32, 226.0)
+	var stb := _make_button(T("設定"), Vector2(396, 14), Vector2(76, 44), _show_settings, 18)
+	_fit_button(stb, 18, 58.0)
 	remove_child(stb)
 	title_layer.add_child(stb)
 	# 進度說明
-	var info := "第一次玩會先帶你做新手教學" if not tut_done else "目前進度：第 %d 關" % level
-	var il := _make_label(info, 19, Vector2(0, 484), 480, Color("5a3d2b"), Color(1, 1, 1, 0.95), 6)
+	var info := T("第一次玩會先帶你做新手教學") if not tut_done else T("目前進度：第 %d 關") % level
+	if tut_done and has_resume:
+		info += T("（接續上次）")
+	var il := _make_label(info, _fit_size(info, 19, 452.0), Vector2(0, 484), 480, Color("5a3d2b"), Color(1, 1, 1, 0.95), 6)
 	remove_child(il)
 	title_layer.add_child(il)
 	if tut_done:
-		var tb := _make_button("玩法教學", Vector2(160, 540), Vector2(160, 52), func() -> void: _leave_title(_start_tutorial), 19)
+		var tb := _make_button(T("玩法教學"), Vector2(150, 540), Vector2(180, 52), func() -> void: _leave_title(_start_tutorial), 19)
+		_fit_button(tb, 19, 150.0)
 		remove_child(tb)
 		title_layer.add_child(tb)
 	# 淡入
@@ -1604,10 +2393,14 @@ func _title_pic(tex_name: String, rect: Rect2) -> TextureRect:
 
 
 func _on_title_start() -> void:
-	if tut_done:
-		_leave_title(func() -> void: start_level(level))
-	else:
+	if not tut_done:
 		_leave_title(_start_tutorial)
+	elif has_resume:
+		# 接續上次沒玩完的盤面，不重新發牌
+		has_resume = false
+		_leave_title(_update_ui)
+	else:
+		_leave_title(func() -> void: start_level(level))
 
 
 func _leave_title(then: Callable) -> void:
@@ -1688,7 +2481,7 @@ func _finish_tutorial() -> void:
 
 
 func _show_tut_done() -> void:
-	_show_dialog("學會了！", "你已經會玩了\n開始排動物吧！", [["開始遊戲", func() -> void: start_level(level)]])
+	_show_dialog(T("學會了！"), T("你已經會玩了\n開始排動物吧！"), [[T("開始遊戲"), func() -> void: start_level(level)]])
 
 
 func _draw_tutorial() -> void:
@@ -1722,9 +2515,9 @@ func _draw_tutorial() -> void:
 			draw_colored_polygon(pts, dimc)
 	draw_style_box(sb_hole, hole.grow(2.0 + 3.0 * (0.5 + 0.5 * sin(clock * 5.0))))
 	# 說明框
-	var lines: PackedStringArray = (st["text"] as String).split("\n")
+	var lines: PackedStringArray = T(st["text"] as String).split("\n")
 	if is_info:
-		lines.append("（點任意處繼續）")
+		lines.append(T("（點任意處繼續）"))
 	var bh := 30.0 + lines.size() * 30.0
 	var by := hole.position.y - bh - 40.0
 	if by < 96.0:
@@ -1732,8 +2525,9 @@ func _draw_tutorial() -> void:
 	var br := Rect2(36, by, 408, bh)
 	draw_style_box(sb_bubble, br)
 	for n in lines.size():
-		var col := Color("5a3d2b") if not lines[n].begins_with("（") else Color("b08a6a")
-		draw_string(font, Vector2(br.position.x, br.position.y + 36.0 + n * 30.0), lines[n], HORIZONTAL_ALIGNMENT_CENTER, br.size.x, 21, col)
+		var col := Color("b08a6a") if (is_info and n == lines.size() - 1) else Color("5a3d2b")
+		var fsz := _fit_size(lines[n], 21, br.size.x - 24.0)
+		draw_string(font, Vector2(br.position.x, br.position.y + 36.0 + n * 30.0), lines[n], HORIZONTAL_ALIGNMENT_CENTER, br.size.x, fsz, col)
 	# 手指（指尖對準要點的位置，上下輕點）
 	if not is_info:
 		var c: Array = cols[st["col"]]
