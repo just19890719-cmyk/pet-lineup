@@ -6,6 +6,7 @@ config_version=5
 config/name="萌寵排排站"
 config/description="點欄位拿起最上面同款動物，排滿一整欄就消除。"
 run/main_scene="res://main.tscn"
+config/icon="res://icon.png"
 config/features=PackedStringArray("4.7", "GL Compatibility")
 
 [display]

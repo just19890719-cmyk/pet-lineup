@@ -29,6 +29,7 @@ Godot 4.7.2 製作的可愛動物「盲盒排序」益智遊戲（原創同類�
   - 重新匯出：`Godot --headless --path <專案> --import`，再 `--export-release "Web" docs/index.html`，然後提交並推送。網頁匯出範本裝在 `%APPDATA%\Godot\export_templates\4.7.2.stable\`（只裝了 web_nothreads 兩個檔）。
   - 字型 `assets/fonts/NotoSansTC-SemiBold-subset.ttf` 只含程式裡出現過的字；**新增或修改遊戲文字後要重跑 `tools/subset_font.py`**（需要 fonttools 與完整的 NotoSansTC 可變字型），否則網頁版新字會缺字（電腦版會退回系統字型）。
   - 網頁版畫面比例用 `window/stretch/aspect.web="keep"`（寬螢幕左右留邊，不裁切）。
+  - 遊戲圖示 `icon.png`（512，ChatGPT 生成：貓咪、熊貓、兔子疊在一起，粉橘漸層底），`project.godot` 的 `config/icon` 指向它；網頁版的分頁圖示與加到手機主畫面的圖示由匯出自動產生。網頁載入畫面 `docs/index.png` 仍是 Godot 預設圖。
   - 「開發」按鈕只在除錯版顯示（`OS.is_debug_build()`），匯出的正式版看不到。
 
 ## 重要檔案
