@@ -1,0 +1,25 @@
+Audio credits
+=============
+
+Sound effects: Kenney (https://kenney.nl) - Interface Sounds, Casino Audio, Music Jingles
+License: Creative Commons Zero (CC0) https://creativecommons.org/publicdomain/zero/1.0/
+
+Music: "Feel good island" by kurt (https://opengameart.org/content/feel-good-island)
+License: CC0 (dual-licensed CC0 / OGA-BY 3.0; used here under CC0)
+
+Files:
+  pick.wav <- interface-sounds/select_005.ogg
+  drop.wav <- interface-sounds/drop_002.ogg
+  deny.wav <- interface-sounds/error_008.ogg
+  flip.wav <- casino-audio/card-slide-1.ogg
+  clear.wav <- interface-sounds/confirmation_002.ogg
+  win.wav <- music-jingles/jingles_STEEL02.ogg
+  button.wav <- interface-sounds/click_001.ogg
+  undo.wav <- interface-sounds/back_002.ogg
+  slot.wav <- interface-sounds/glass_006.ogg
+  unlock.wav <- interface-sounds/maximize_004.ogg
+  stuck.wav <- music-jingles/jingles_PIZZI01.ogg
+  pop.wav <- interface-sounds/maximize_007.ogg
+  tick.wav <- interface-sounds/tick_004.ogg
+  step.wav <- interface-sounds/toggle_002.ogg
+  bgm.ogg <- island_0.ogg

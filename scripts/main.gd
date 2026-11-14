@@ -1520,7 +1520,7 @@ func _init_audio() -> void:
 		add_child(pl)
 		sfx_players.append(pl)
 	music_player = AudioStreamPlayer.new()
-	music_player.volume_db = -9.0
+	music_player.volume_db = -15.0   # 外部素材的音樂本身比較大聲，壓低當背景
 	add_child(music_player)
 	# 背景音樂優先讀立體聲的 ogg，沒有才讀 wav
 	var bp := "res://assets/audio/bgm.ogg"
@@ -1546,7 +1546,7 @@ func _play(n: String, pitch: float = 1.0, vol_db: float = 0.0) -> void:
 	sfx_idx = (sfx_idx + 1) % sfx_players.size()
 	pl.stream = sfx[n]
 	pl.pitch_scale = pitch
-	pl.volume_db = vol_db + 3.0   # 新版音效整體做得比較小聲、留了餘裕，這裡統一補回來
+	pl.volume_db = vol_db + 2.0   # 音效檔留了餘裕，這裡統一補一點
 	pl.play()
 
 
