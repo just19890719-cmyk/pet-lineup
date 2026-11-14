@@ -65,6 +65,15 @@ var tut_step := 0
 var tut_done := false
 var title_layer: Control
 var skip_btn: Button
+var settings_btn: Button
+var sfx: Dictionary = {}        # 音效名稱 → AudioStream
+var sfx_players: Array = []
+var sfx_idx := 0
+var music_player: AudioStreamPlayer
+var sfx_on := true
+var music_on := true
+var combo := 0                  # 連續幾步都有消除（音調逐次升高）
+var last_tick := -1.0
 
 
 # ───────────────────────── 初始化 ─────────────────────────
@@ -81,6 +90,9 @@ func _ready() -> void:
 	_build_theme()
 	_build_styles()
 	_build_ui()
+	sfx_on = not _load_flag("sfx_off")
+	music_on = not _load_flag("music_off")
+	_init_audio()
 	level = _load_level()
 	tut_done = _load_flag("tutorial_done")
 	start_level(level)
@@ -94,6 +106,11 @@ func _ready() -> void:
 		tut_step = 2
 	if args.has("--dev"):
 		_toggle_dev()
+	if args.has("--settings"):
+		_show_settings()
+	if args.has("--audio-check"):
+		var ms = music_player.stream
+		print("audio-check sfx=%d music=%s loop_end=%s playing=%s" % [sfx.size(), ms != null, ms.loop_end if ms is AudioStreamWAV else -1, music_player.playing])
 	if args.has("--tut-auto"):
 		# 自動照著教學點，用來驗證七個步驟走得完
 		var tm := Timer.new()
@@ -208,6 +225,7 @@ func _sbt(tex_name: String, mod: Color) -> StyleBoxTexture:
 ## 按鈕按下縮小、放開彈回
 func _juice(b: Button) -> void:
 	b.button_down.connect(func() -> void:
+		_play("button")
 		b.pivot_offset = b.size / 2.0
 		b.create_tween().tween_property(b, "scale", Vector2(0.93, 0.93), 0.06))
 	b.button_up.connect(func() -> void:
@@ -269,6 +287,7 @@ func _build_ui() -> void:
 	hint_label = _make_label("點欄位拿起最上面同款動物，再點要放的欄位", 16, Vector2(0, 86), 480, Color("5a3d2b"), Color(1, 1, 1, 0.9), 4)
 	skip_btn = _make_button("跳過", Vector2(8, 14), Vector2(76, 44), func() -> void: _finish_tutorial(), 18)
 	skip_btn.visible = false
+	settings_btn = _make_button("設定", Vector2(8, 14), Vector2(76, 44), _show_settings, 18)
 	undo_btn = _make_button("撤回", Vector2(60, 776), Vector2(170, 58), _on_undo)
 	restart_btn = _make_button("重新開始", Vector2(250, 776), Vector2(170, 58), _on_restart)
 	dev_btn = _make_button("開發", Vector2(396, 14), Vector2(76, 44), _toggle_dev, 18)
@@ -327,6 +346,7 @@ func _toggle_dev() -> void:
 func start_level(l: int, sd: int = -1) -> void:
 	level = max(1, l)
 	tut_active = false
+	combo = 0
 	seen.clear()
 	if sd < 0:
 		sd = level * 7919 + 17
@@ -510,6 +530,9 @@ func _do_move_to_col(i: int) -> void:
 		var tile: Dictionary = m[0]
 		cols[i].append(tile)
 		tile["off"] = (m[1] as Vector2) - _tile_pos(i, cols[i].size() - 1)
+	_play("drop")
+	if movers.size() > 1:
+		get_tree().create_timer(0.07).timeout.connect(func() -> void: _play("drop", 1.15, -4.0))
 	_after_move([i])
 
 
@@ -522,6 +545,7 @@ func _do_move_to_slot(k: int) -> void:
 	var tile: Dictionary = src.pop_back()
 	slots[k] = tile
 	tile["off"] = old - _slot_rect(k).get_center()
+	_play("slot")
 	_after_move([])
 
 
@@ -529,13 +553,17 @@ func _after_move(targets: Array) -> void:
 	sel_col = -1
 	sel_slot = -1
 	_reveal_tops(true)
+	var combo_before := combo
 	for i in targets:
 		_check_complete(i)
+	if combo == combo_before:
+		combo = 0
 	_check_end()
 	_update_ui()
 
 
 func _reveal_tops(anim: bool) -> void:
+	var flipped := false
 	for c in cols:
 		if c.is_empty():
 			continue
@@ -544,6 +572,9 @@ func _reveal_tops(anim: bool) -> void:
 			top["r"] = true
 			if anim:
 				top["pop"] = POP_TIME
+				if not flipped:
+					flipped = true
+					_play("flip")
 		seen[top["id"]] = true
 
 
@@ -560,6 +591,8 @@ func _check_complete(i: int) -> void:
 		var tile: Dictionary = c[j]
 		fx.append({"kind": "tile", "pos": _tile_pos(i, j), "off": tile["off"], "t": t,
 			"time": 0.0, "delay": j * 0.03, "dur": 0.35})
+	combo += 1
+	_play("clear", 1.0 + 0.1 * min(combo - 1, 5))
 	var tr := _tube_rect(i)
 	fx.append({"kind": "ring", "pos": tr.get_center(), "r": tr.size.y * 0.62, "time": 0.0, "delay": 0.05, "dur": 0.55})
 	for s in 20:
@@ -586,6 +619,7 @@ func _check_end() -> void:
 	if _all_clear():
 		game_over = true
 		_spawn_confetti()
+		get_tree().create_timer(0.4).timeout.connect(func() -> void: _play("win"))
 		if tut_active:
 			tut_done = true
 			_save_flag("tutorial_done", true)
@@ -656,6 +690,7 @@ func _restore_tile(d: Dictionary) -> Dictionary:
 func _on_undo() -> void:
 	if history.is_empty():
 		return
+	_play("undo")
 	var snap: Dictionary = history.pop_back()
 	cols = []
 	for a in snap["cols"]:
@@ -695,18 +730,33 @@ func _gui_input(event: InputEvent) -> void:
 	if tut_active:
 		_tut_tap(p)
 		return
+	var h0 := history.size()
+	var had := sel_col >= 0 or sel_slot >= 0
 	for k in SLOT_COUNT:
 		if _slot_rect(k).grow(4).has_point(p):
 			_tap_slot(k)
+			_tap_sound(h0, had)
 			return
 	for i in cols.size():
 		var tr := _tube_rect(i)
 		var hit := Rect2(BOARD.position.x + col_w * i, tr.position.y - 40, col_w, tr.size.y + 40)
 		if hit.has_point(p):
 			_tap_col(i)
+			_tap_sound(h0, had)
 			return
 	sel_col = -1
 	sel_slot = -1
+
+
+## 點擊後的音效：剛拿起來 → 拿起聲；本來有拿、沒搬成功卻換了選取 → 不行的提示聲
+func _tap_sound(h0: int, had: bool) -> void:
+	if history.size() > h0:
+		return   # 有搬動，搬動的地方自己會出聲
+	var has := sel_col >= 0 or sel_slot >= 0
+	if has and not had:
+		_play("pick")
+	elif has and had:
+		_play("deny")
 
 
 func _tap_col(i: int) -> void:
@@ -754,6 +804,7 @@ func _unlock_slot(k: int) -> void:
 	if slot_unlocked[k]:
 		return
 	slot_unlocked[k] = true
+	_play("unlock")
 	var c := _slot_rect(k).get_center()
 	for s in 8:
 		var ang := TAU * s / 8.0
@@ -785,6 +836,9 @@ func _anim_tile(t: Dictionary, k: float, delta: float) -> void:
 	var wait: float = t.get("wait", 0.0)
 	if wait > 0.0:
 		t["wait"] = wait - delta
+		if wait - delta <= 0.0 and clock - last_tick > 0.06:
+			last_tick = clock
+			_play("tick", randf_range(0.9, 1.2), -10.0)
 		return
 	var land: float = t.get("land", 0.0)
 	if land > 0.0:
@@ -985,6 +1039,7 @@ func _update_ui() -> void:
 	undo_btn.visible = not tut_active
 	restart_btn.visible = not tut_active
 	skip_btn.visible = tut_active
+	settings_btn.visible = not tut_active
 	undo_btn.disabled = history.is_empty()
 	# 停用時把橘色字框換成深灰，灰底上才讀得清楚
 	undo_btn.add_theme_color_override("font_outline_color", Color("5e5148") if undo_btn.disabled else Color("b8601a"))
@@ -998,6 +1053,7 @@ func _close_overlay() -> void:
 
 func _show_dialog(title: String, msg: String, buttons: Array) -> void:
 	_close_overlay()
+	_play("pop")
 	overlay = Control.new()
 	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	overlay.mouse_filter = Control.MOUSE_FILTER_STOP
@@ -1057,6 +1113,7 @@ func _show_stuck() -> void:
 		btns.append(["解鎖第4格", func() -> void: _unlock_slot(3)])
 	btns.append(["重新開始", _on_restart])
 	_show_dialog("卡住了", "沒有可以走的步了", btns)
+	_play("stuck")
 
 
 # ───────────────────────── 存檔 ─────────────────────────
@@ -1157,6 +1214,67 @@ func _save_flag(key: String, v: bool) -> void:
 	cf.save(SAVE_PATH)
 
 
+# ───────────────────────── 音效與音樂 ─────────────────────────
+func _init_audio() -> void:
+	for n in ["pick", "drop", "deny", "flip", "clear", "win", "button", "undo", "slot", "unlock", "stuck", "pop", "tick", "step"]:
+		var p := "res://assets/audio/%s.wav" % n
+		if ResourceLoader.exists(p):
+			sfx[n] = load(p)
+	for i in 8:
+		var pl := AudioStreamPlayer.new()
+		add_child(pl)
+		sfx_players.append(pl)
+	music_player = AudioStreamPlayer.new()
+	music_player.volume_db = -12.0
+	add_child(music_player)
+	var bp := "res://assets/audio/bgm.wav"
+	if ResourceLoader.exists(bp):
+		var st = load(bp)
+		if st is AudioStreamWAV:
+			st.loop_mode = AudioStreamWAV.LOOP_FORWARD
+			st.loop_begin = 0
+			st.loop_end = int(st.get_length() * st.mix_rate)
+		music_player.stream = st
+		if music_on:
+			music_player.play()
+
+
+func _play(n: String, pitch: float = 1.0, vol_db: float = 0.0) -> void:
+	if not sfx_on or not sfx.has(n) or sfx_players.is_empty():
+		return
+	var pl: AudioStreamPlayer = sfx_players[sfx_idx]
+	sfx_idx = (sfx_idx + 1) % sfx_players.size()
+	pl.stream = sfx[n]
+	pl.pitch_scale = pitch
+	pl.volume_db = vol_db
+	pl.play()
+
+
+func _show_settings() -> void:
+	_show_dialog("設定", "", [
+		["音效：%s" % ("開" if sfx_on else "關"), func() -> void: _set_sfx(not sfx_on)],
+		["音樂：%s" % ("開" if music_on else "關"), func() -> void: _set_music(not music_on)],
+		["關閉", _close_overlay],
+	])
+
+
+func _set_sfx(v: bool) -> void:
+	sfx_on = v
+	_save_flag("sfx_off", not v)
+	_show_settings()
+
+
+func _set_music(v: bool) -> void:
+	music_on = v
+	_save_flag("music_off", not v)
+	if music_player.stream != null:
+		if v:
+			music_player.play()
+		else:
+			music_player.stop()
+	_show_settings()
+
+
 # ───────────────────────── 彩帶 ─────────────────────────
 func _spawn_confetti() -> void:
 	var cols_hex := ["ff6b9d", "ffd34d", "7ed957", "5cc8ff", "ff9f43", "b98cff"]
@@ -1216,6 +1334,9 @@ func _show_title() -> void:
 		sb.add_theme_stylebox_override("pressed", _sbt("btn_green", Color(0.86, 0.86, 0.86)))
 		sb.add_theme_color_override("font_outline_color", Color("2c7a2c"))
 		sb.add_theme_constant_override("outline_size", 8)
+	var stb := _make_button("設定", Vector2(396, 14), Vector2(76, 44), _show_settings, 18)
+	remove_child(stb)
+	title_layer.add_child(stb)
 	# 進度說明
 	var info := "第一次玩會先帶你做新手教學" if not tut_done else "目前進度：第 %d 關" % level
 	var il := _make_label(info, 19, Vector2(0, 484), 480, Color("5a3d2b"), Color(1, 1, 1, 0.95), 6)
@@ -1305,13 +1426,17 @@ func _tut_tap(p: Vector2) -> void:
 	var st: Dictionary = TUT[tut_step]
 	if st.has("info"):
 		tut_step += 1
+		_play("step")
 		return
 	var i: int = st["col"]
 	var tr := _tube_rect(i)
 	var hit := Rect2(BOARD.position.x + col_w * i, tr.position.y - 40, col_w, tr.size.y + 40)
 	if hit.has_point(p):
 		tut_step += 1
+		var h0 := history.size()
+		var had := sel_col >= 0 or sel_slot >= 0
 		_tap_col(i)
+		_tap_sound(h0, had)
 
 
 func _finish_tutorial() -> void:
