@@ -1,31 +1,42 @@
-; 萌寵排排站：可愛動物盲盒排序益智遊戲（Godot 4.7）
+; Engine configuration file.
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
+
 config_version=5
+
+[admob]
+
+general/android/enabled=false
 
 [application]
 
 config/name="萌寵排排站"
 config/name_localized={
-"zh_CN": "萌宠排排站",
+"de": "Pet Lineup",
 "en": "Pet Lineup",
+"es": "Pet Lineup",
+"fr": "Pet Lineup",
+"id": "Pet Lineup",
+"it": "Pet Lineup",
 "ja": "ペットならべ",
 "ko": "펫 줄세우기",
-"de": "Pet Lineup",
-"fr": "Pet Lineup",
-"es": "Pet Lineup",
+"nl": "Pet Lineup",
 "pt": "Pet Lineup",
-"it": "Pet Lineup",
 "ru": "Pet Lineup",
-"id": "Pet Lineup",
 "vi": "Pet Lineup",
-"nl": "Pet Lineup"
+"zh_CN": "萌宠排排站"
 }
 config/description="點欄位拿起最上面同款動物，排滿一整欄就消除。"
 run/main_scene="res://main.tscn"
-config/icon="res://icon.png"
-boot_splash/bg_color=Color(1, 0.86, 0.9, 1)
-boot_splash/image="res://icon.png"
-boot_splash/fullsize=false
 config/features=PackedStringArray("4.7", "GL Compatibility")
+boot_splash/bg_color=Color(1, 0.86, 0.9, 1)
+boot_splash/stretch_mode=0
+boot_splash/image="res://icon.png"
+config/icon="res://icon.png"
 
 [display]
 
@@ -35,8 +46,12 @@ window/size/window_width_override=540
 window/size/window_height_override=960
 window/stretch/mode="canvas_items"
 window/stretch/aspect="keep_width"
-window/stretch/aspect.web="keep"
 window/handheld/orientation=1
+window/stretch/aspect.web="keep"
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/admob/plugin.cfg")
 
 [gui]
 
@@ -48,14 +63,10 @@ texture={
 "mipmaps/generate": true
 }
 
-[input_devices]
-
-pointing/emulate_touch_from_mouse=false
-
 [rendering]
 
+textures/canvas_textures/default_texture_filter=2
 renderer/rendering_method="gl_compatibility"
 renderer/rendering_method.mobile="gl_compatibility"
-textures/canvas_textures/default_texture_filter=2
 textures/vram_compression/import_etc2_astc=true
 environment/defaults/default_clear_color=Color(0.75, 0.9, 1, 1)

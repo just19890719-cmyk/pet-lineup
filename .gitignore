@@ -3,3 +3,4 @@ assets/_backup_*/
 .godot/
 .claude/
 build/
+addons/admob/android/bin/
