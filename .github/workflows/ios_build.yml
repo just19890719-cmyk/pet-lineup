@@ -20,11 +20,19 @@ env:
 jobs:
   build:
     name: 匯出並編譯（不簽署）
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 45
     steps:
       - name: 取得程式
         uses: actions/checkout@v4
+
+      - name: 選用最新的 Xcode 26（Godot 4.7 的範本需要新版開發套件才連結得過）
+        run: |
+          ls -d /Applications/Xcode*.app
+          X=$(ls -d /Applications/Xcode_26*.app | grep -vi beta | sort -V | tail -1)
+          sudo xcode-select -s "$X/Contents/Developer"
+          echo "::notice title=Xcode::$(xcodebuild -version | tr '
+' ' ')"
 
       - name: 下載 Godot 與匯出範本
         run: |
@@ -66,7 +74,8 @@ jobs:
           {
             echo "── 檔案"; ls
             echo "── 圖示"; find . -path "*AppIcon.appiconset*" -type f | head -30
-            echo "── 各語言名稱"; find . -name "InfoPlist.strings" | head -30
+            echo "── 各語言名稱"; ls -d PetLineup/*.lproj; cat PetLineup/en.lproj/InfoPlist.strings
+            echo "── 設定檔"; grep -A1 -E "CFBundleDisplayName|CFBundleIdentifier|UISupportedInterfaceOrientations|ITSApp|UIDeviceFamily|Usage" PetLineup/*Info.plist | head -40
             echo "── 專案內容"; xcodebuild -list -project PetLineup.xcodeproj 2>&1
           } > inspect.log 2>&1 || true
           cat inspect.log
