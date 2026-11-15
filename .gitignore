@@ -2,3 +2,4 @@ tools/openai_key.txt
 assets/_backup_*/
 .godot/
 .claude/
+build/

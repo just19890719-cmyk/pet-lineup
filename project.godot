@@ -4,6 +4,21 @@ config_version=5
 [application]
 
 config/name="萌寵排排站"
+config/name_localized={
+"zh_CN": "萌宠排排站",
+"en": "Pet Lineup",
+"ja": "ペットならべ",
+"ko": "펫 줄세우기",
+"de": "Pet Lineup",
+"fr": "Pet Lineup",
+"es": "Pet Lineup",
+"pt": "Pet Lineup",
+"it": "Pet Lineup",
+"ru": "Pet Lineup",
+"id": "Pet Lineup",
+"vi": "Pet Lineup",
+"nl": "Pet Lineup"
+}
 config/description="點欄位拿起最上面同款動物，排滿一整欄就消除。"
 run/main_scene="res://main.tscn"
 config/icon="res://icon.png"

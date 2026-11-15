@@ -1,0 +1,87 @@
+# 蘋果手機版編譯檢查（第一階段）
+# 目的：確認在 Windows 做的遊戲，在蘋果電腦上匯出、編譯得過。
+# 這一階段不簽署、不上傳到蘋果，所以不需要任何金鑰，也還不能裝到手機。
+# 本版本庫是公開的：金鑰、團隊編號之後一律放 GitHub 的「祕密設定」，不寫在這個檔案裡。
+name: 蘋果手機版編譯檢查
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/ios_build.yml"
+      - "export_presets.cfg"
+      - "project.godot"
+
+env:
+  GODOT_VERSION: 4.7.2-stable
+  GODOT_TEMPLATE_DIR: 4.7.2.stable
+
+jobs:
+  build:
+    name: 匯出並編譯（不簽署）
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: 取得程式
+        uses: actions/checkout@v4
+
+      - name: 下載 Godot 與匯出範本
+        run: |
+          set -euo pipefail
+          BASE="https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}"
+          curl -fL --retry 3 -o godot.zip "${BASE}/Godot_v${GODOT_VERSION}_macos.universal.zip"
+          curl -fL --retry 3 -o templates.tpz "${BASE}/Godot_v${GODOT_VERSION}_export_templates.tpz"
+          unzip -q godot.zip -d "$RUNNER_TEMP/godot"
+          unzip -q templates.tpz -d "$RUNNER_TEMP/tpl"
+          DEST="$HOME/Library/Application Support/Godot/export_templates/${GODOT_TEMPLATE_DIR}"
+          mkdir -p "$DEST"
+          mv "$RUNNER_TEMP/tpl/templates/"* "$DEST/"
+          ls "$DEST" | grep -i ios
+          echo "GODOT=$RUNNER_TEMP/godot/Godot.app/Contents/MacOS/Godot" >> "$GITHUB_ENV"
+          rm godot.zip templates.tpz
+
+      - name: 填入編譯檢查用的假團隊編號
+        run: |
+          # 只為了讓匯出通過檢查；這一階段不簽署，真的團隊編號之後從祕密設定帶入
+          sed -i '' 's|^application/app_store_team_id=""|application/app_store_team_id="ABCDE12345"|' export_presets.cfg
+          grep -n "app_store_team_id" export_presets.cfg
+
+      - name: 匯入素材
+        run: |
+          "$GODOT" --headless --path . --import || true
+          "$GODOT" --headless --path . --import
+
+      - name: 匯出 Xcode 專案
+        run: |
+          set -euo pipefail
+          mkdir -p build/ios
+          "$GODOT" --headless --path . --export-release "iOS" build/ios/PetLineup.ipa
+          ls -la build/ios
+          test -d build/ios/PetLineup.xcodeproj
+
+      - name: 檢查匯出內容（圖示、名稱、設定）
+        run: |
+          cd build/ios
+          echo "── 圖示"
+          find . -path "*AppIcon.appiconset*" -type f | head -40
+          echo "── 各語言名稱"
+          find . -name "InfoPlist.strings" | head -40
+          echo "── Info.plist"
+          cat PetLineup/PetLineup-Info.plist || find . -name "*Info.plist" -maxdepth 3
+
+      - name: 編譯（不簽署）
+        run: |
+          set -euo pipefail
+          cd build/ios
+          xcodebuild -version
+          xcodebuild -list -project PetLineup.xcodeproj
+          set -o pipefail
+          xcodebuild \
+            -project PetLineup.xcodeproj \
+            -scheme PetLineup \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build | tail -n 60
