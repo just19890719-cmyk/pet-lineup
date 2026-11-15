@@ -75,7 +75,7 @@ jobs:
           perl -pi -e "s|^application/version=\".*\"|application/version=\"${GITHUB_RUN_NUMBER}\"|" export_presets.cfg
           grep -q "^application/app_store_team_id=\"$TEAM\"" export_presets.cfg || { echo "::error::團隊編號沒寫進匯出設定"; exit 1; }
           VER=$(grep '^application/short_version=' export_presets.cfg | cut -d'"' -f2 || true)
-          echo "::notice title=版本::版本 $VER，組建號 ${GITHUB_RUN_NUMBER}"
+          echo "::notice title=版本::版本 ${VER}，組建號 ${GITHUB_RUN_NUMBER}"
 
       - name: 匯入素材
         run: |
@@ -169,7 +169,7 @@ jobs:
           tail -n 60 export.log
           if [ $CODE -ne 0 ]; then
             ERR=$( (grep -E "error|EXPORT FAILED" export.log | sort -u | head -n 25; echo "── 最後幾行"; tail -n 15 export.log) | head -c 3500 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
-            echo "::error title=匯出失敗（$DEST）::$ERR"
+            echo "::error title=匯出失敗（${DEST}）::$ERR"
             exit $CODE
           fi
           ls -la "$RUNNER_TEMP/export"
