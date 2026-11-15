@@ -8,8 +8,8 @@ extends Node
 # 申請好之後填進 REAL_*，正式版就會自動改用（開發版永遠用測試編號，避免自己點到真廣告被停權）。
 const TEST_REWARDED := "ca-app-pub-3940256099942544/1712485313"
 const TEST_INTERSTITIAL := "ca-app-pub-3940256099942544/4411468910"
-const REAL_REWARDED := ""
-const REAL_INTERSTITIAL := ""
+const REAL_REWARDED := "ca-app-pub-6023320630940952/2403563715"       # AdMob「求救獎勵」
+const REAL_INTERSTITIAL := "ca-app-pub-6023320630940952/9603571897"   # AdMob「過關廣告」
 
 const RETRY_SECONDS := 20.0       # 載入失敗後隔多久再試
 
