@@ -226,6 +226,8 @@ func _ready() -> void:
 		add_child(tm)
 	if args.has("--win"):
 		_dev_win()
+	if args.has("--store-shot"):
+		dev_btn.visible = false   # 商店截圖用：藏起「開發」按鈕
 
 
 ## 翻譯：以繁體中文原文查表，查不到就顯示原文
@@ -2308,7 +2310,8 @@ func _sim_moves(c: Array, s: String, nslots: int) -> Array:
 ## 測試用：有提示就照著點，沒提示就要一個
 func _auto_hint_step(state: Dictionary) -> void:
 	if state["done"]:
-		get_tree().quit()
+		if not OS.get_cmdline_user_args().has("--store-shot"):   # 截圖時停住等動畫結束
+			get_tree().quit()
 		return
 	if hint_busy:
 		return
