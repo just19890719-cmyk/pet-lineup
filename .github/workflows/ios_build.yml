@@ -63,25 +63,28 @@ jobs:
       - name: 檢查匯出內容（圖示、名稱、設定）
         run: |
           cd build/ios
-          echo "── 圖示"
-          find . -path "*AppIcon.appiconset*" -type f | head -40
-          echo "── 各語言名稱"
-          find . -name "InfoPlist.strings" | head -40
-          echo "── Info.plist"
-          cat PetLineup/PetLineup-Info.plist || find . -name "*Info.plist" -maxdepth 3
+          {
+            echo "── 檔案"; ls
+            echo "── 圖示"; find . -path "*AppIcon.appiconset*" -type f | head -30
+            echo "── 各語言名稱"; find . -name "InfoPlist.strings" | head -30
+            echo "── 專案內容"; xcodebuild -list -project PetLineup.xcodeproj 2>&1
+          } > inspect.log 2>&1 || true
+          cat inspect.log
+          # 紀錄檔要登入才看得到，所以把重點寫成公開的註記
+          echo "::notice title=匯出內容::$(head -c 3500 inspect.log | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"
 
       - name: 編譯（不簽署）
         run: |
-          set -euo pipefail
           cd build/ios
-          xcodebuild -version
-          xcodebuild -list -project PetLineup.xcodeproj
-          set -o pipefail
-          xcodebuild \
-            -project PetLineup.xcodeproj \
-            -scheme PetLineup \
-            -configuration Release \
-            -sdk iphoneos \
-            -destination "generic/platform=iOS" \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            build | tail -n 60
+          SCHEME=$(xcodebuild -list -project PetLineup.xcodeproj 2>/dev/null | awk '/Schemes:/{f=1;next} f&&NF{print $1;exit}')
+          echo "scheme=$SCHEME"
+          set +e
+          xcodebuild             -project PetLineup.xcodeproj             -scheme "${SCHEME:-PetLineup}"             -configuration Release             -sdk iphoneos             -destination "generic/platform=iOS"             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""             build > xcodebuild.log 2>&1
+          CODE=$?
+          tail -n 80 xcodebuild.log
+          if [ $CODE -ne 0 ]; then
+            ERR=$( (grep -E "error:|errors? generated|BUILD FAILED|xcodebuild: error" xcodebuild.log | sort -u | head -n 25; echo "── 最後幾行"; tail -n 15 xcodebuild.log) | head -c 3500 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=編譯失敗（scheme=$SCHEME）::$ERR"
+            exit $CODE
+          fi
+          echo "::notice title=編譯成功::$(grep -E 'BUILD SUCCEEDED' xcodebuild.log | head -1)"
