@@ -75,7 +75,7 @@ jobs:
             echo "── 圖示"; find . -path "*AppIcon.appiconset*" -type f | head -30
             echo "── 各語言名稱"; ls -d PetLineup/*.lproj; cat PetLineup/en.lproj/InfoPlist.strings
             echo "── 設定檔"; grep -A1 -E "GADApplicationIdentifier|MinimumOSVersion|ITSApp|Usage" PetLineup/*Info.plist | head -40
-            echo "── 外掛"; find . -iname "*in-app-purchase*" -maxdepth 4 | head -5; find . -iname "*admob*" -maxdepth 4 | head -8; grep -c "SKAdNetworkIdentifier" PetLineup/*Info.plist; grep -c "GoogleMobileAds" PetLineup.xcodeproj/project.pbxproj
+            echo "── 外掛"; echo "內購外掛在專案檔出現次數：$(grep -c "in-app-purchase" PetLineup.xcodeproj/project.pbxproj)"; echo "內購外掛初始化：$(grep -rl "ios_in_app_purchase_init" PetLineup --include="*.cpp" --include="*.mm" --include="*.m" --include="*.h" | head -3)"; find . -iname "*in-app-purchase*" -maxdepth 7 | head -4; find . -iname "*admob*" -maxdepth 4 | head -8; grep -c "SKAdNetworkIdentifier" PetLineup/*Info.plist; grep -c "GoogleMobileAds" PetLineup.xcodeproj/project.pbxproj
             echo "── 專案內容"; xcodebuild -list -project PetLineup.xcodeproj 2>&1
           } > inspect.log 2>&1 || true
           cat inspect.log
