@@ -1,0 +1,175 @@
+# 蘋果手機版：雲端封存＋簽署，勾選「上傳」時才送到 TestFlight（第二階段）
+# 做法照 cam貼貼 的「送到 TestFlight」：封存先不簽署，匯出時用上傳金鑰交給蘋果「自動簽署」。
+#
+# 兩種跑法：
+#   1. 試跑（預設）：改到這個檔案推上去就會自動跑，只封存、簽署、做出 .ipa，不上傳。
+#   2. 上傳：GitHub「Actions」→ 左邊選「送到 TestFlight」→「Run workflow」→ 勾「上傳到 TestFlight」。
+#
+# 需要的 4 個祕密設定（倉庫 Settings → Secrets and variables → Actions，內容只放在那裡）：
+#   APPLE_TEAM_ID  ASC_KEY_ID  ASC_ISSUER_ID  ASC_KEY_P8
+# 本版本庫是公開的：這個檔案只寫祕密設定的名稱，不寫內容。
+name: 送到 TestFlight
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload:
+        description: "上傳到 TestFlight（不勾就只試跑：封存、簽署，不上傳）"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/ios_testflight.yml"
+
+env:
+  GODOT_VERSION: 4.7.2-stable
+  GODOT_TEMPLATE_DIR: 4.7.2.stable
+  # 推上去自動跑的時候沒有輸入值，一律當作「不上傳」
+  DO_UPLOAD: ${{ github.event_name == 'workflow_dispatch' && inputs.upload == true }}
+
+jobs:
+  testflight:
+    name: 封存、簽署${{ (github.event_name == 'workflow_dispatch' && inputs.upload) && '、上傳' || '（試跑不上傳）' }}
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - name: 取得程式
+        uses: actions/checkout@v4
+
+      - name: 選用最新的 Xcode 26
+        run: |
+          X=$(ls -d /Applications/Xcode_26*.app | grep -vi beta | sort -V | tail -1)
+          sudo xcode-select -s "$X/Contents/Developer"
+          echo "::notice title=Xcode::$(xcodebuild -version | xargs)"
+
+      - name: 下載 Godot 與匯出範本
+        run: |
+          set -euo pipefail
+          BASE="https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}"
+          curl -fL --retry 3 -o godot.zip "${BASE}/Godot_v${GODOT_VERSION}_macos.universal.zip"
+          curl -fL --retry 3 -o templates.tpz "${BASE}/Godot_v${GODOT_VERSION}_export_templates.tpz"
+          unzip -q godot.zip -d "$RUNNER_TEMP/godot"
+          unzip -q templates.tpz -d "$RUNNER_TEMP/tpl"
+          DEST="$HOME/Library/Application Support/Godot/export_templates/${GODOT_TEMPLATE_DIR}"
+          mkdir -p "$DEST"
+          mv "$RUNNER_TEMP/tpl/templates/"* "$DEST/"
+          echo "GODOT=$RUNNER_TEMP/godot/Godot.app/Contents/MacOS/Godot" >> "$GITHUB_ENV"
+          rm godot.zip templates.tpz
+
+      # 組建號用這個流程的執行序號，每次都比上次大，TestFlight 才收；版本號照 export_presets.cfg
+      - name: 填入團隊編號與組建號
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_TEAM_ID" || { echo "::error::缺少祕密設定 APPLE_TEAM_ID"; exit 1; }
+          sed -i '' "s|^application/app_store_team_id=\"\"|application/app_store_team_id=\"$APPLE_TEAM_ID\"|" export_presets.cfg
+          sed -i '' "s|^application/version=\".*\"|application/version=\"${GITHUB_RUN_NUMBER}\"|" export_presets.cfg
+          VER=$(grep '^application/short_version=' export_presets.cfg | cut -d'"' -f2)
+          echo "::notice title=版本::版本 $VER，組建號 ${GITHUB_RUN_NUMBER}"
+
+      - name: 匯入素材
+        run: |
+          "$GODOT" --headless --path . --import || true
+          "$GODOT" --headless --path . --import
+
+      - name: 匯出 Xcode 專案
+        run: |
+          set -euo pipefail
+          mkdir -p build/ios
+          "$GODOT" --headless --path . --export-release "iOS" build/ios/PetLineup.ipa
+          test -d build/ios/PetLineup.xcodeproj
+          grep -A1 -E "ITSAppUsesNonExemptEncryption|CFBundleVersion|CFBundleShortVersionString|GADApplicationIdentifier" build/ios/PetLineup/*Info.plist || true
+
+      - name: 放上傳金鑰
+        env:
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+        run: |
+          test -n "$ASC_KEY_P8" && test -n "$ASC_KEY_ID" || { echo "::error::缺少祕密設定 ASC_KEY_P8 或 ASC_KEY_ID"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/keys"
+          printf '%s\n' "$ASC_KEY_P8" > "$RUNNER_TEMP/keys/AuthKey_${ASC_KEY_ID}.p8"
+
+      # 封存時先不簽署：自動簽署封存會要「開發用描述檔」，那需要先登記實體手機。
+      # 上架用的簽署交給匯出那一步（上架用描述檔不需要登記手機）。
+      - name: 封存（先不簽署）
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          cd build/ios
+          SCHEME=$(xcodebuild -list -project PetLineup.xcodeproj 2>/dev/null | awk '/Schemes:/{f=1;next} f&&NF{print $1;exit}')
+          echo "scheme=$SCHEME"
+          set +e
+          xcodebuild archive \
+            -project PetLineup.xcodeproj \
+            -scheme "${SCHEME:-PetLineup}" \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/PetLineup.xcarchive" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            CODE_SIGN_STYLE=Automatic \
+            CODE_SIGNING_ALLOWED=NO > archive.log 2>&1
+          CODE=$?
+          tail -n 60 archive.log
+          if [ $CODE -ne 0 ]; then
+            ERR=$( (grep -E "error:|ARCHIVE FAILED|xcodebuild: error" archive.log | sort -u | head -n 25; echo "── 最後幾行"; tail -n 15 archive.log) | head -c 3500 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=封存失敗::$ERR"
+            exit $CODE
+          fi
+          echo "::notice title=封存成功::$(grep -E 'ARCHIVE SUCCEEDED' archive.log | head -1)"
+
+      # 谷歌廣告等內嵌框架自帶原廠簽名，沒簽署的封存會留著舊簽名，匯出時會被判定「簽名不對」。
+      # 先統一改成臨時簽名，匯出時再由蘋果整個換成上架用簽名。
+      - name: 統一內嵌框架簽名
+        run: |
+          APP=$(ls -d "$RUNNER_TEMP/PetLineup.xcarchive/Products/Applications/"*.app | head -1)
+          FW="$APP/Frameworks"
+          ls "$FW" 2>/dev/null || echo "沒有內嵌框架"
+          for f in "$FW"/*.framework "$FW"/*.dylib; do
+            [ -e "$f" ] || continue
+            codesign --force --sign - --timestamp=none "$f"
+          done
+
+      - name: 匯出${{ (github.event_name == 'workflow_dispatch' && inputs.upload) && '並上傳到 App Store Connect' || '（試跑：只做 .ipa，不上傳）' }}
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          test -n "$ASC_ISSUER_ID" || { echo "::error::缺少祕密設定 ASC_ISSUER_ID"; exit 1; }
+          if [ "$DO_UPLOAD" = "true" ]; then DEST=upload; else DEST=export; fi
+          OPT="$RUNNER_TEMP/ExportOptions.plist"
+          /usr/libexec/PlistBuddy -c "Add :method string app-store-connect" \
+            -c "Add :destination string $DEST" \
+            -c "Add :signingStyle string automatic" \
+            -c "Add :teamID string $APPLE_TEAM_ID" \
+            -c "Add :uploadSymbols bool true" \
+            -c "Add :manageAppVersionAndBuildNumber bool false" "$OPT"
+          set +e
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/PetLineup.xcarchive" \
+            -exportOptionsPlist "$OPT" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/keys/AuthKey_${ASC_KEY_ID}.p8" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" > export.log 2>&1
+          CODE=$?
+          tail -n 60 export.log
+          if [ $CODE -ne 0 ]; then
+            ERR=$( (grep -E "error|EXPORT FAILED" export.log | sort -u | head -n 25; echo "── 最後幾行"; tail -n 15 export.log) | head -c 3500 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=匯出失敗（$DEST）::$ERR"
+            exit $CODE
+          fi
+          ls -la "$RUNNER_TEMP/export"
+          if [ "$DEST" = "upload" ]; then
+            echo "::notice title=已上傳::組建號 ${GITHUB_RUN_NUMBER} 已送到 App Store Connect，處理完會出現在 TestFlight（約 10～30 分鐘）"
+          else
+            echo "::notice title=試跑成功::簽署好的 .ipa 已做出來，沒有上傳"
+          fi
+
+      - name: 刪除金鑰
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/keys"
