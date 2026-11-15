@@ -70,6 +70,8 @@ var skip_btn: Button
 var settings_btn: Button
 var reveal_btn: Button
 var ad_layer: Control
+var ads: Node                   # 真廣告（scripts/ads.gd），只有蘋果手機版有作用
+var store: Node                 # 內購（scripts/store.gd），只有蘋果手機版有作用
 var no_ads := false             # 已買免廣告：不跳插頁廣告，求救道具不用看廣告
 var undo_left := -1             # 這一關剩下的免費撤回次數；-1 = 無限
 var reveal_free := 0            # 這一關剩下的免費「翻問號」次數
@@ -128,6 +130,7 @@ func _ready() -> void:
 	_build_styles()
 	_build_ui()
 	no_ads = _load_flag("no_ads")
+	_init_store_and_ads()
 	sfx_on = not _load_flag("sfx_off")
 	music_on = not _load_flag("music_off")
 	_init_audio()
@@ -149,6 +152,8 @@ func _ready() -> void:
 		_toggle_dev()
 	if args.has("--settings"):
 		_show_settings()
+	if args.has("--buy"):
+		_show_buy()
 	for a in args:
 		if a.begins_with("--level="):
 			start_level(int(a.get_slice("=", 1)))
@@ -548,6 +553,7 @@ func _build_dev_panel() -> void:
 		["重置求救次數", _dev_reset_helpers],
 		["切換免廣告", _dev_toggle_no_ads],
 		["模擬插頁廣告", _dev_fake_ad],
+		["免廣告購買畫面", _show_buy],
 		["直接提示一步", _run_hint],
 	]
 	for it in items:
@@ -1552,12 +1558,87 @@ func _play(n: String, pitch: float = 1.0, vol_db: float = 0.0) -> void:
 
 
 func _show_settings() -> void:
-	_show_dialog(T("設定"), "", [
+	var items: Array = [
 		[T("音效：%s") % (T("開") if sfx_on else T("關")), func() -> void: _set_sfx(not sfx_on)],
 		[T("音樂：%s") % (T("開") if music_on else T("關")), func() -> void: _set_music(not music_on)],
 		[T("語言：%s") % I18n.NATIVE[I18n.lang], _show_language],
-		[T("關閉"), _close_overlay],
+	]
+	if _shop_visible() and not no_ads:
+		items.append([T("移除廣告"), _show_buy])
+		items.append([T("恢復購買"), _restore_purchase])
+	items.append([T("關閉"), _close_overlay])
+	_show_dialog(T("設定"), "", items)
+
+
+# ───────────────────────── 免廣告內購 ─────────────────────────
+const AdsScript := preload("res://scripts/ads.gd")
+const StoreScript := preload("res://scripts/store.gd")
+
+
+func _init_store_and_ads() -> void:
+	store = StoreScript.new()
+	add_child(store)
+	store.owned_changed.connect(_on_store_owned)
+	store.purchase_finished.connect(_on_purchase_finished)
+	store.restore_finished.connect(_on_restore_finished)
+	store.start()
+	ads = AdsScript.new()
+	add_child(ads)
+	if not no_ads:
+		ads.start()
+
+
+## 購買入口只在有商店的蘋果手機版出現；開發版也顯示，方便在電腦上看版面（按購買會直接當作買成功）
+func _shop_visible() -> bool:
+	return StoreScript.available() or OS.is_debug_build()
+
+
+func _show_buy() -> void:
+	var label: String = T("購買") if store.price == "" else T("移除廣告 %s") % store.price
+	_show_dialog(T("移除廣告"), T("一次購買，永久移除所有廣告，求救道具不用再看廣告"), [
+		[label, _buy_no_ads],
+		[T("恢復購買"), _restore_purchase],
+		[T("不用了"), _close_overlay],
 	])
+
+
+func _buy_no_ads() -> void:
+	if not StoreScript.available():
+		_on_store_owned()               # 只有開發版走得到這裡
+		_on_purchase_finished(true, false)
+		return
+	_show_dialog(T("請稍候…"), "", [[T("關閉"), _close_overlay]])
+	store.buy()
+
+
+func _restore_purchase() -> void:
+	if not StoreScript.available():
+		_on_restore_finished(no_ads)    # 只有開發版走得到這裡
+		return
+	_show_dialog(T("請稍候…"), "", [[T("關閉"), _close_overlay]])
+	store.restore()
+
+
+func _on_store_owned() -> void:
+	no_ads = true
+	_save_flag("no_ads", true)
+	_update_ui()
+
+
+func _on_purchase_finished(ok: bool, cancelled: bool) -> void:
+	if ok:
+		_show_dialog(T("移除廣告"), T("已移除廣告，謝謝你的支持！"), [[T("知道了"), _close_overlay]])
+	elif cancelled:
+		_close_overlay()
+	else:
+		_show_dialog(T("移除廣告"), T("購買沒有完成，請稍後再試"), [[T("知道了"), _close_overlay]])
+
+
+func _on_restore_finished(found: bool) -> void:
+	if found:
+		_show_dialog(T("恢復購買"), T("已移除廣告，謝謝你的支持！"), [[T("知道了"), _close_overlay]])
+	else:
+		_show_dialog(T("恢復購買"), T("找不到購買紀錄"), [[T("知道了"), _close_overlay]])
 
 
 func _set_sfx(v: bool) -> void:
@@ -1742,6 +1823,15 @@ func _reward_ad(reward: Callable) -> void:
 	if no_ads:
 		reward.call()
 		return
+	if AdsScript.available():
+		# 蘋果手機版：播真的獎勵廣告，看完才給
+		ads.show_rewarded(func() -> void:
+			ad_this_level = true
+			last_ad_ms = Time.get_ticks_msec()
+			reward.call(), func(not_ready: bool) -> void:
+			if not_ready:
+				_show_dialog(T("獎勵廣告"), T("廣告還沒準備好，請稍後再試"), [[T("知道了"), _close_overlay]]))
+		return
 	ad_this_level = true
 	_fake_ad(T("獎勵廣告"), reward)
 
@@ -1754,7 +1844,10 @@ func _next_level() -> void:
 		and Time.get_ticks_msec() - last_inter_ms >= AD_MIN_GAP_MS
 	if due:
 		last_inter_ms = Time.get_ticks_msec()
-		_fake_ad(T("過關廣告"), func() -> void: start_level(nxt))
+		if AdsScript.available():
+			ads.show_interstitial(func() -> void: start_level(nxt))
+		else:
+			_fake_ad(T("過關廣告"), func() -> void: start_level(nxt))
 	else:
 		start_level(nxt)
 
