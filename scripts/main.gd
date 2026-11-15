@@ -118,7 +118,9 @@ func _ready() -> void:
 	# 語言：存檔裡有選過就用選的，沒有就看系統語言
 	var saved_lang := _load_text("lang", "")
 	I18n.lang = I18n.LANGS.find(saved_lang) if I18n.LANGS.has(saved_lang) else I18n.detect(OS.get_locale())
-	for a0 in OS.get_cmdline_user_args():
+	# 測試用啟動參數只在開發版生效，正式版一律忽略
+	var args: PackedStringArray = OS.get_cmdline_user_args() if OS.is_debug_build() else PackedStringArray()
+	for a0 in args:
 		if a0.begins_with("--lang="):   # 測試用：只影響這次執行
 			I18n.lang = max(0, I18n.LANGS.find(a0.get_slice("=", 1)))
 	_apply_lang_font()
@@ -137,7 +139,6 @@ func _ready() -> void:
 	last_ad_ms = Time.get_ticks_msec()
 	last_inter_ms = last_ad_ms
 	# 測試用啟動參數（接在 -- 後面）：--skip-title 跳過開始畫面、--tutorial 直接進教學、--win 直接過關
-	var args := OS.get_cmdline_user_args()
 	if args.has("--tutorial"):
 		_start_tutorial()
 	elif not args.has("--skip-title"):
@@ -1758,9 +1759,21 @@ func _next_level() -> void:
 		start_level(nxt)
 
 
+## 假廣告只給開發版和網頁試玩版看；手機正式版絕對不能出現「測試用的假廣告」字樣
+func _fake_ad_allowed() -> bool:
+	return OS.is_debug_build() or OS.has_feature("web")
+
+
 ## 假廣告畫面（還沒接真的廣告服務）：倒數幾秒後自動關閉並執行 then
+## 之後接上真的廣告服務時，把下面「手機正式版」那一段換成播放真廣告
 func _fake_ad(kind: String, then: Callable) -> void:
 	if ad_layer != null:
+		return
+	if not _fake_ad_allowed():
+		# 手機正式版：還沒接真廣告之前直接放行，不顯示任何測試畫面
+		_close_overlay()
+		last_ad_ms = Time.get_ticks_msec()
+		then.call()
 		return
 	_close_overlay()
 	last_ad_ms = Time.get_ticks_msec()
