@@ -63,10 +63,18 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
-          test -n "$APPLE_TEAM_ID" || { echo "::error::缺少祕密設定 APPLE_TEAM_ID"; exit 1; }
-          sed -i '' "s|^application/app_store_team_id=\"\"|application/app_store_team_id=\"$APPLE_TEAM_ID\"|" export_presets.cfg
-          sed -i '' "s|^application/version=\".*\"|application/version=\"${GITHUB_RUN_NUMBER}\"|" export_presets.cfg
-          VER=$(grep '^application/short_version=' export_presets.cfg | cut -d'"' -f2)
+          trap 'echo "::error title=填入設定失敗::第 $LINENO 行：$BASH_COMMAND"' ERR
+          # 貼上時可能多帶空白或換行，先去掉；團隊編號應該是 10 碼英數字
+          TEAM=$(printf '%s' "$APPLE_TEAM_ID" | tr -d '[:space:]')
+          test -n "$TEAM" || { echo "::error::缺少祕密設定 APPLE_TEAM_ID"; exit 1; }
+          echo "$TEAM" | grep -Eq '^[A-Z0-9]{10}$' || { echo "::error::APPLE_TEAM_ID 格式不對（應為 10 碼英數字，共 ${#TEAM} 字）"; exit 1; }
+          echo "TEAM_ID=$TEAM" >> "$GITHUB_ENV"
+          # 檔案在 Windows 存過，先統一換行，避免比對不到
+          perl -pi -e 's/\r$//' export_presets.cfg
+          perl -pi -e "s|^application/app_store_team_id=\".*\"|application/app_store_team_id=\"$TEAM\"|" export_presets.cfg
+          perl -pi -e "s|^application/version=\".*\"|application/version=\"${GITHUB_RUN_NUMBER}\"|" export_presets.cfg
+          grep -q "^application/app_store_team_id=\"$TEAM\"" export_presets.cfg || { echo "::error::團隊編號沒寫進匯出設定"; exit 1; }
+          VER=$(grep '^application/short_version=' export_presets.cfg | cut -d'"' -f2 || true)
           echo "::notice title=版本::版本 $VER，組建號 ${GITHUB_RUN_NUMBER}"
 
       - name: 匯入素材
@@ -86,10 +94,16 @@ jobs:
         env:
           ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
         run: |
-          test -n "$ASC_KEY_P8" && test -n "$ASC_KEY_ID" || { echo "::error::缺少祕密設定 ASC_KEY_P8 或 ASC_KEY_ID"; exit 1; }
+          KID=$(printf '%s' "$ASC_KEY_ID" | tr -d '[:space:]')
+          ISS=$(printf '%s' "$ASC_ISSUER_ID" | tr -d '[:space:]')
+          test -n "$ASC_KEY_P8" && test -n "$KID" && test -n "$ISS" || { echo "::error::缺少祕密設定 ASC_KEY_P8、ASC_KEY_ID 或 ASC_ISSUER_ID"; exit 1; }
+          printf '%s' "$ASC_KEY_P8" | grep -q "BEGIN PRIVATE KEY" || { echo "::error::ASC_KEY_P8 內容看起來不是 .p8 金鑰全文（缺少開頭那一行）"; exit 1; }
+          echo "KEY_ID=$KID" >> "$GITHUB_ENV"
+          echo "ISSUER_ID=$ISS" >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/keys"
-          printf '%s\n' "$ASC_KEY_P8" > "$RUNNER_TEMP/keys/AuthKey_${ASC_KEY_ID}.p8"
+          printf '%s\n' "$ASC_KEY_P8" | tr -d '\r' > "$RUNNER_TEMP/keys/AuthKey_${KID}.p8"
 
       # 封存時先不簽署：自動簽署封存會要「開發用描述檔」，那需要先登記實體手機。
       # 上架用的簽署交給匯出那一步（上架用描述檔不需要登記手機）。
@@ -107,7 +121,7 @@ jobs:
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath "$RUNNER_TEMP/PetLineup.xcarchive" \
-            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
             CODE_SIGN_STYLE=Automatic \
             CODE_SIGNING_ALLOWED=NO > archive.log 2>&1
           CODE=$?
@@ -132,19 +146,14 @@ jobs:
           done
 
       - name: 匯出${{ (github.event_name == 'workflow_dispatch' && inputs.upload) && '並上傳到 App Store Connect' || '（試跑：只做 .ipa，不上傳）' }}
-        env:
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
         run: |
           set -euo pipefail
-          test -n "$ASC_ISSUER_ID" || { echo "::error::缺少祕密設定 ASC_ISSUER_ID"; exit 1; }
           if [ "$DO_UPLOAD" = "true" ]; then DEST=upload; else DEST=export; fi
           OPT="$RUNNER_TEMP/ExportOptions.plist"
           /usr/libexec/PlistBuddy -c "Add :method string app-store-connect" \
             -c "Add :destination string $DEST" \
             -c "Add :signingStyle string automatic" \
-            -c "Add :teamID string $APPLE_TEAM_ID" \
+            -c "Add :teamID string $TEAM_ID" \
             -c "Add :uploadSymbols bool true" \
             -c "Add :manageAppVersionAndBuildNumber bool false" "$OPT"
           set +e
@@ -153,9 +162,9 @@ jobs:
             -exportOptionsPlist "$OPT" \
             -exportPath "$RUNNER_TEMP/export" \
             -allowProvisioningUpdates \
-            -authenticationKeyPath "$RUNNER_TEMP/keys/AuthKey_${ASC_KEY_ID}.p8" \
-            -authenticationKeyID "$ASC_KEY_ID" \
-            -authenticationKeyIssuerID "$ASC_ISSUER_ID" > export.log 2>&1
+            -authenticationKeyPath "$RUNNER_TEMP/keys/AuthKey_${KEY_ID}.p8" \
+            -authenticationKeyID "$KEY_ID" \
+            -authenticationKeyIssuerID "$ISSUER_ID" > export.log 2>&1
           CODE=$?
           tail -n 60 export.log
           if [ $CODE -ne 0 ]; then
