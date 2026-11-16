@@ -28,6 +28,8 @@ const I18n := preload("res://scripts/i18n.gd")
 const MAX_LEVEL := 300
 
 var level: int = 1
+var best_level: int = 1       # 玩到過的最遠關卡（選關畫面可以回到 1 ～ best_level）
+var top_pad := 0.0            # 動態島／瀏海要讓開的高度（畫面座標），整個畫面往下推這麼多
 var cols: Array = []          # Array[Array[Dictionary]]，索引 0 = 最底
 var cap: int = 6
 var slots: Array = []         # null 或 Dictionary
@@ -129,12 +131,15 @@ func _ready() -> void:
 	_build_theme()
 	_build_styles()
 	_build_ui()
+	_apply_safe_area()
+	get_viewport().size_changed.connect(_apply_safe_area)
 	no_ads = _load_flag("no_ads")
 	_init_store_and_ads()
 	sfx_on = not _load_flag("sfx_off")
 	music_on = not _load_flag("music_off")
 	_init_audio()
 	level = _load_level()
+	best_level = max(level, _load_best())
 	tut_done = _load_flag("tutorial_done")
 	start_level(level)
 	has_resume = _load_run()
@@ -228,6 +233,23 @@ func _ready() -> void:
 		_dev_win()
 	if args.has("--store-shot"):
 		dev_btn.visible = false   # 商店截圖用：藏起「開發」按鈕
+	if args.has("--level-select"):
+		# 測試：假裝玩到第 58 關（只影響這次執行，不寫入存檔），直接開選關畫面
+		best_level = 58
+		start_level(58)
+		_show_level_select()
+	if args.has("--tap-test"):
+		# 測試：安全區往下推之後，點第 3 欄（用螢幕座標）要真的選到第 3 欄
+		await get_tree().create_timer(1.5).timeout
+		var ev := InputEventMouseButton.new()
+		ev.button_index = MOUSE_BUTTON_LEFT
+		ev.pressed = true
+		var k := float(DisplayServer.window_get_size().x) / get_viewport_rect().size.x
+		ev.position = (_tube_rect(2).get_center() + Vector2(0, top_pad)) * k
+		ev.global_position = ev.position
+		print("tap-test expect local=", _tube_rect(2).get_center())
+		get_viewport().push_input(ev)
+		print("tap-test top_pad=%.1f sel_col=%d" % [top_pad, sel_col])
 
 
 ## 翻譯：以繁體中文原文查表，查不到就顯示原文
@@ -672,6 +694,36 @@ func _shuffle(arr: Array, rng: RandomNumberGenerator) -> void:
 
 
 # ───────────────────────── 版面 ─────────────────────────
+const CONTENT_H := 846.0   # 遊戲內容往下用到的高度（最底下的按鈕到 y=838）；畫面比這個高的部分才有空間讓位
+
+
+## 動態島／瀏海安全區：把整個畫面往下推，讓關卡標題與設定鈕不被擋住。
+## 畫面較矮的手機（空間不夠）最多只推到不會把底下按鈕推出畫面為止。
+func _apply_safe_area() -> void:
+	var raw := 0.0
+	var sim := -1.0
+	if OS.is_debug_build():
+		for a in OS.get_cmdline_user_args():
+			if a.begins_with("--safe-top="):   # 測試用：假裝安全區上緣高度（單位：手機螢幕像素）
+				sim = float(a.get_slice("=", 1))
+	var vp := get_viewport_rect().size
+	var win_w := float(DisplayServer.window_get_size().x)
+	if sim >= 0.0:
+		raw = sim * vp.x / maxf(1.0, win_w)
+	elif OS.has_feature("ios") or OS.has_feature("android"):
+		var sa := DisplayServer.get_display_safe_area()
+		if win_w > 0.0 and sa.size.x > 0:
+			raw = float(sa.position.y) * vp.x / win_w
+	if raw > 0.0:
+		raw += 8.0   # 多留一點呼吸空間
+	var pad := clampf(raw, 0.0, maxf(0.0, vp.y - CONTENT_H))
+	if absf(pad - top_pad) < 0.01 and get_viewport().canvas_transform.origin.y == pad:
+		return
+	top_pad = pad
+	get_viewport().canvas_transform = Transform2D(0.0, Vector2(0.0, top_pad))
+	queue_redraw()
+
+
 func _layout() -> void:
 	var n := cols.size()
 	col_w = BOARD.size.x / n
@@ -877,6 +929,9 @@ func _check_end() -> void:
 			_save_flag("tutorial_done", true)
 			get_tree().create_timer(0.9).timeout.connect(_show_tut_done)
 			return
+		# 重玩舊關卡過關時，最遠關卡不能被拉回來
+		best_level = max(best_level, level + 1)
+		_save_best(best_level)
 		_save_level(level + 1)
 		get_tree().create_timer(0.9).timeout.connect(_show_win)
 		return
@@ -1153,7 +1208,7 @@ func _draw() -> void:
 				draw_texture_rect(Art.ui["slot_lock"], Rect2(-r.size / 2.0 - Vector2(3, 3), r.size + Vector2(6, 6)), false)
 				draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 				if not tut_active:
-					var tag := T("免費") if level <= HONEYMOON_LEVELS else _ad_text(T("看廣告"), T("解鎖"))
+					var tag := _ad_text(T("看廣告"), T("解鎖"))
 					_draw_text_center(tag, Vector2(r.get_center().x, r.end.y + 20), 14, Color.WHITE, Color("5a3a28"))
 			else:
 				draw_style_box(sb_slot_locked, r)
@@ -1184,16 +1239,18 @@ func _draw() -> void:
 
 
 func _draw_bg() -> void:
-	var sz := size
+	# 整個畫面被往下推了 top_pad，背景要從 -top_pad 開始畫，才會鋪滿整個螢幕
+	var sz := Vector2(size.x, size.y + top_pad)
+	var origin := Vector2(0.0, -top_pad)
 	if Art.bg_tex != null:
 		var ts := Art.bg_tex.get_size()
 		var sc: float = max(sz.x / ts.x, sz.y / ts.y)
 		var ds := ts * sc
-		draw_texture_rect(Art.bg_tex, Rect2((sz - ds) / 2.0, ds), false)
+		draw_texture_rect(Art.bg_tex, Rect2(origin + (sz - ds) / 2.0, ds), false)
 		return
 	var top := Color("bfe8ff")
 	var bot := Color("ffe3f0")
-	draw_polygon(PackedVector2Array([Vector2.ZERO, Vector2(sz.x, 0), sz, Vector2(0, sz.y)]),
+	draw_polygon(PackedVector2Array([origin, origin + Vector2(sz.x, 0), origin + sz, origin + Vector2(0, sz.y)]),
 		PackedColorArray([top, top, bot, bot]))
 
 
@@ -1352,6 +1409,7 @@ func _show_dialog(title: String, msg: String, buttons: Array) -> void:
 	var dim := ColorRect.new()
 	dim.color = Color(0, 0, 0, 0.45)
 	dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	dim.offset_top = -top_pad
 	overlay.add_child(dim)
 	var panel := PanelContainer.new()
 	var vb := VBoxContainer.new()
@@ -1411,8 +1469,7 @@ func _show_stuck() -> void:
 			ut = T("補撤回次數") + _ad_text(T("（看廣告）"), "")
 		btns.append([ut, _on_undo])
 	if not slot_unlocked[slot_n - 1]:
-		var free_unlock := level <= HONEYMOON_LEVELS
-		btns.append([T("解鎖暫存格") + (T("（免費）") if free_unlock else _ad_text(T("（看廣告）"), "")), func() -> void: _request_unlock(slot_n - 1)])
+		btns.append([T("解鎖暫存格") + _ad_text(T("（看廣告）"), ""), func() -> void: _request_unlock(slot_n - 1)])
 	if not _hidden_tiles().is_empty():
 		btns.append([T("翻開問號") + (T("（免費）") if reveal_free > 0 else _ad_text(T("（看廣告）"), "")), _on_reveal])
 	btns.append([T("重新開始"), _on_restart])
@@ -1432,6 +1489,20 @@ func _save_level(l: int) -> void:
 	var cf := ConfigFile.new()
 	cf.load(SAVE_PATH)
 	cf.set_value("progress", "level", l)
+	cf.save(SAVE_PATH)
+
+
+func _load_best() -> int:
+	var cf := ConfigFile.new()
+	if cf.load(SAVE_PATH) != OK:
+		return 1
+	return max(1, int(cf.get_value("progress", "best", 1)))
+
+
+func _save_best(l: int) -> void:
+	var cf := ConfigFile.new()
+	cf.load(SAVE_PATH)
+	cf.set_value("progress", "best", l)
 	cf.save(SAVE_PATH)
 
 
@@ -1497,6 +1568,8 @@ func _dev_almost_complete() -> void:
 
 func _dev_reset_save() -> void:
 	_save_level(1)
+	best_level = 1
+	_save_best(1)
 	tut_done = false
 	_save_flag("tutorial_done", false)
 	start_level(1)
@@ -1564,12 +1637,97 @@ func _show_settings() -> void:
 		[T("音效：%s") % (T("開") if sfx_on else T("關")), func() -> void: _set_sfx(not sfx_on)],
 		[T("音樂：%s") % (T("開") if music_on else T("關")), func() -> void: _set_music(not music_on)],
 		[T("語言：%s") % I18n.NATIVE[I18n.lang], _show_language],
+		[T("選關"), _show_level_select],
 	]
 	if _shop_visible() and not no_ads:
 		items.append([T("移除廣告"), _show_buy])
 		items.append([T("恢復購買"), _restore_purchase])
 	items.append([T("關閉"), _close_overlay])
 	_show_dialog(T("設定"), "", items)
+
+
+# ───────────────────────── 選關 ─────────────────────────
+const LEVEL_COLS := 5
+const LEVEL_BTN := Vector2(58, 48)
+
+
+## 選關畫面：列出 1 ～ 玩到過的最遠關卡，點一關就回去玩（最遠進度不會被洗掉）
+func _show_level_select() -> void:
+	_close_overlay()
+	_play("pop")
+	overlay = Control.new()
+	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	var dim := ColorRect.new()
+	dim.color = Color(0, 0, 0, 0.45)
+	dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	dim.offset_top = -top_pad
+	overlay.add_child(dim)
+	var panel := PanelContainer.new()
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 12)
+	panel.add_child(vb)
+	var tl := Label.new()
+	tl.text = T("選關")
+	tl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	tl.add_theme_font_size_override("font_size", _fit_size(tl.text, 32, 300.0))
+	tl.add_theme_color_override("font_color", Color("ff7a45"))
+	vb.add_child(tl)
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(LEVEL_COLS * (LEVEL_BTN.x + 8.0) + 18.0, 380)
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	vb.add_child(scroll)
+	var grid := GridContainer.new()
+	grid.columns = LEVEL_COLS
+	grid.add_theme_constant_override("h_separation", 8)
+	grid.add_theme_constant_override("v_separation", 8)
+	scroll.add_child(grid)
+	for l in range(1, best_level + 1):
+		var b := Button.new()
+		b.text = str(l)
+		b.custom_minimum_size = LEVEL_BTN
+		b.focus_mode = Control.FOCUS_NONE
+		b.add_theme_font_size_override("font_size", 20)
+		if l == level and Art.ui.has("btn_green"):
+			# 目前這一關用綠色標出
+			b.add_theme_stylebox_override("normal", _sbt("btn_green", Color.WHITE))
+			b.add_theme_stylebox_override("hover", _sbt("btn_green", Color.WHITE))
+			b.add_theme_stylebox_override("pressed", _sbt("btn_green", Color(0.86, 0.86, 0.86)))
+			b.add_theme_color_override("font_outline_color", Color("2c7a2c"))
+			b.add_theme_constant_override("outline_size", 6)
+		b.pressed.connect(_pick_level.bind(l))
+		_juice(b)
+		grid.add_child(b)
+	var close := Button.new()
+	close.text = T("關閉")
+	close.custom_minimum_size = Vector2(300, 56)
+	close.focus_mode = Control.FOCUS_NONE
+	_fit_button(close, 22, 268.0)
+	close.pressed.connect(_close_overlay)
+	_juice(close)
+	vb.add_child(close)
+	overlay.add_child(panel)
+	add_child(overlay)
+	panel.set_anchors_and_offsets_preset(Control.PRESET_CENTER, Control.PRESET_MODE_MINSIZE)
+	_scroll_to_level(scroll, level)
+	move_child(dev_panel, get_child_count() - 1)
+
+
+## 等版面排好之後，把目前這一關捲到視窗中間附近
+func _scroll_to_level(scroll: ScrollContainer, l: int) -> void:
+	await get_tree().process_frame
+	await get_tree().process_frame
+	if not is_instance_valid(scroll):
+		return
+	var row := (l - 1) / LEVEL_COLS
+	scroll.scroll_vertical = maxi(0, int(row * (LEVEL_BTN.y + 8.0)) - 150)
+
+
+func _pick_level(l: int) -> void:
+	_close_overlay()
+	_save_level(l)
+	has_resume = false   # 換了關卡，不再接續上次的盤面
+	_leave_title(func() -> void: start_level(l))
 
 
 # ───────────────────────── 免廣告內購 ─────────────────────────
@@ -1662,7 +1820,7 @@ func _set_music(v: bool) -> void:
 
 # ───────────────────────── 求救道具與廣告 ─────────────────────────
 ## 規則（數字集中在這裡，方便之後調整）
-const HONEYMOON_LEVELS := 10      # 前幾關：撤回無限、解鎖免費、不跳插頁廣告
+const HONEYMOON_LEVELS := 10      # 前幾關：撤回無限、翻問號與提示各免費 1 次、不跳插頁廣告（解鎖暫存格一律要看廣告）
 const UNDO_FREE_MID := 3          # 第 11–60 關每關免費撤回次數
 const UNDO_FREE_LATE := 5         # 第 61 關以後每關免費撤回次數
 const UNDO_PER_AD := [5, 8, 10]   # 看一次廣告補幾次撤回（暫存格 3 格 / 2 格 / 1 格的關卡）
@@ -1780,7 +1938,7 @@ func _dev_fake_ad() -> void:
 func _request_unlock(k: int) -> void:
 	if slot_unlocked[k]:
 		return
-	if tut_active or level <= HONEYMOON_LEVELS:
+	if tut_active:
 		_unlock_slot(k)
 		return
 	_show_dialog(T("解鎖暫存格"), _ad_text(T("看一段廣告，這一關多一格暫存格"), T("這一關多一格暫存格")), [
@@ -1832,7 +1990,9 @@ func _reward_ad(reward: Callable) -> void:
 			last_ad_ms = Time.get_ticks_msec()
 			reward.call(), func(not_ready: bool) -> void:
 			if not_ready:
-				_show_dialog(T("獎勵廣告"), T("廣告還沒準備好，請稍後再試"), [[T("知道了"), _close_overlay]]))
+				# 測試版（AdsScript.DEBUG_ADS）多顯示一行原因，送審前會關掉
+				var why: String = "\n\n" + ads.debug_status() if AdsScript.DEBUG_ADS else ""
+				_show_dialog(T("獎勵廣告"), T("廣告還沒準備好，請稍後再試") + why, [[T("知道了"), _close_overlay]]))
 		return
 	ad_this_level = true
 	_fake_ad(T("獎勵廣告"), reward)
@@ -1879,6 +2039,7 @@ func _fake_ad(kind: String, then: Callable) -> void:
 	var bg := ColorRect.new()
 	bg.color = Color(0.08, 0.06, 0.1, 0.94)
 	bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	bg.offset_top = -top_pad
 	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	ad_layer.add_child(bg)
 	var texts := [
@@ -2431,12 +2592,14 @@ func _show_title() -> void:
 		bg.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		bg.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
 		bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		bg.offset_top = -top_pad   # 整個畫面被往下推了，背景要往上補回去，不然最上面會露出空白
 		bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		title_layer.add_child(bg)
 	else:
 		var cr := ColorRect.new()
 		cr.color = Color("ffe3f0")
 		cr.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		cr.offset_top = -top_pad
 		title_layer.add_child(cr)
 	# 標題
 	# 標題圖是中文字，只有中文語系用圖；其他語言先用文字顯示翻譯後的名稱
@@ -2480,10 +2643,14 @@ func _show_title() -> void:
 	remove_child(il)
 	title_layer.add_child(il)
 	if tut_done:
-		var tb := _make_button(T("玩法教學"), Vector2(150, 540), Vector2(180, 52), func() -> void: _leave_title(_start_tutorial), 19)
+		var tb := _make_button(T("玩法教學"), Vector2(50, 540), Vector2(180, 52), func() -> void: _leave_title(_start_tutorial), 19)
 		_fit_button(tb, 19, 150.0)
 		remove_child(tb)
 		title_layer.add_child(tb)
+		var lb := _make_button(T("選關"), Vector2(250, 540), Vector2(180, 52), _show_level_select, 19)
+		_fit_button(lb, 19, 150.0)
+		remove_child(lb)
+		title_layer.add_child(lb)
 	# 淡入
 	title_layer.modulate.a = 0.0
 	title_layer.create_tween().tween_property(title_layer, "modulate:a", 1.0, 0.25)
