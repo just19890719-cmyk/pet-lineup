@@ -96,6 +96,8 @@ const TABLE := {
 	"解鎖暫存格": ["解锁暂存格", "Unlock a slot", "待機マスを解除", "보관 칸 열기", "Ablagefeld öffnen", "Débloquer une réserve", "Abrir una casilla", "Liberar um espaço", "Sblocca una casella", "Открыть ячейку", "Buka slot cadangan", "Mở ô chờ", "Reservevak openen"],
 	"翻開問號": ["翻开问号", "Reveal tiles", "？をめくる", "물음표 뒤집기", "Felder aufdecken", "Révéler des cases", "Revelar fichas", "Revelar peças", "Rivela tessere", "Открыть вопросы", "Buka ubin misteri", "Lật ô bí ẩn", "Vraagtekens onthullen"],
 	# ── 設定 ──
+	"音效": ["音效", "Sound", "効果音", "효과음", "Ton", "Sons", "Sonido", "Som", "Suoni", "Звук", "Suara", "Âm thanh", "Geluid"],
+	"音樂": ["音乐", "Music", "音楽", "음악", "Musik", "Musique", "Música", "Música", "Musica", "Музыка", "Musik", "Nhạc", "Muziek"],
 	"音效：%s": ["音效：%s", "Sound: %s", "効果音：%s", "효과음: %s", "Ton: %s", "Sons : %s", "Sonido: %s", "Som: %s", "Suoni: %s", "Звук: %s", "Suara: %s", "Âm thanh: %s", "Geluid: %s"],
 	"音樂：%s": ["音乐：%s", "Music: %s", "音楽：%s", "음악: %s", "Musik: %s", "Musique : %s", "Música: %s", "Música: %s", "Musica: %s", "Музыка: %s", "Musik: %s", "Nhạc: %s", "Muziek: %s"],
 	"語言：%s": ["语言：%s", "Language: %s", "言語：%s", "언어: %s", "Sprache: %s", "Langue : %s", "Idioma: %s", "Idioma: %s", "Lingua: %s", "Язык: %s", "Bahasa: %s", "Ngôn ngữ: %s", "Taal: %s"],

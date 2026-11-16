@@ -12,8 +12,8 @@ Files:
   drop.wav <- interface-sounds/drop_002.ogg
   deny.wav <- interface-sounds/error_008.ogg
   flip.wav <- casino-audio/card-slide-1.ogg
-  clear.wav <- interface-sounds/confirmation_002.ogg
-  win.wav <- music-jingles/jingles_STEEL02.ogg
+  clear.wav <- 自己合成（tools/gen_sfx2.py，音樂盒上行琶音，無第三方素材）
+  win.wav <- 自己合成（tools/gen_sfx2.py，豎琴般的五聲音階滑奏加長和弦，無第三方素材）
   button.wav <- interface-sounds/click_001.ogg
   undo.wav <- interface-sounds/back_002.ogg
   slot.wav <- interface-sounds/glass_006.ogg

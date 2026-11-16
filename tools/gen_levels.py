@@ -35,7 +35,7 @@ def nominal(L):
     p = progress(L)
     T = 4 if p <= 0.035 else 5 if p <= 0.175 else 6 if p <= 0.495 else 7
     cap = 6 + round(6 * p ** 0.75)
-    slots = 3 if p <= 0.6 else 2 if p <= 0.85 else 1
+    slots = 2 if p <= 0.85 else 1            # 2026-11-17：拿掉 3 格暫存格那一段（使用者實測第 1 關太容易）
     return T, cap, slots, 0.40 - 0.32 * p
 
 

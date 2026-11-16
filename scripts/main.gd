@@ -101,8 +101,8 @@ var sfx: Dictionary = {}        # 音效名稱 → AudioStream
 var sfx_players: Array = []
 var sfx_idx := 0
 var music_player: AudioStreamPlayer
-var sfx_on := true
-var music_on := true
+var sfx_vol := 1.0              # 音效音量 0.0 ～ 1.0（設定裡的拉桿；0 = 靜音）
+var music_vol := 1.0            # 音樂音量 0.0 ～ 1.0
 var combo := 0                  # 連續幾步都有消除（音調逐次升高）
 var last_tick := -1.0
 
@@ -135,8 +135,9 @@ func _ready() -> void:
 	get_viewport().size_changed.connect(_apply_safe_area)
 	no_ads = _load_flag("no_ads")
 	_init_store_and_ads()
-	sfx_on = not _load_flag("sfx_off")
-	music_on = not _load_flag("music_off")
+	# 音量：沒存過就看舊版的開關（關 = 0，開 = 1）
+	sfx_vol = _load_volume("sfx_vol", "sfx_off")
+	music_vol = _load_volume("music_vol", "music_off")
 	_init_audio()
 	level = _load_level()
 	best_level = max(level, _load_best())
@@ -1400,7 +1401,7 @@ func _close_overlay() -> void:
 		overlay = null
 
 
-func _show_dialog(title: String, msg: String, buttons: Array) -> void:
+func _show_dialog(title: String, msg: String, buttons: Array, extras: Array = []) -> void:
 	_close_overlay()
 	_play("pop")
 	overlay = Control.new()
@@ -1428,6 +1429,8 @@ func _show_dialog(title: String, msg: String, buttons: Array) -> void:
 		ml.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		ml.custom_minimum_size = Vector2(300, 0)
 		vb.add_child(ml)
+	for ex in extras:
+		vb.add_child(ex)
 	for b in buttons:
 		var btn := Button.new()
 		btn.text = b[0]
@@ -1617,25 +1620,37 @@ func _init_audio() -> void:
 			st.loop_begin = 0
 			st.loop_end = int(st.get_length() * st.mix_rate)
 		music_player.stream = st
-		if music_on:
-			music_player.play()
+		_apply_music_volume()
+
+
+## 拉桿的 0～1 換成實際增益：用平方讓小聲那一段調起來比較細
+func _gain_db(v: float) -> float:
+	return linear_to_db(maxf(v * v, 0.0001))
+
+
+func _apply_music_volume() -> void:
+	if music_player == null or music_player.stream == null:
+		return
+	music_player.volume_db = -15.0 + _gain_db(music_vol)
+	if music_vol <= 0.0:
+		music_player.stop()
+	elif not music_player.playing:
+		music_player.play()
 
 
 func _play(n: String, pitch: float = 1.0, vol_db: float = 0.0) -> void:
-	if not sfx_on or not sfx.has(n) or sfx_players.is_empty():
+	if sfx_vol <= 0.0 or not sfx.has(n) or sfx_players.is_empty():
 		return
 	var pl: AudioStreamPlayer = sfx_players[sfx_idx]
 	sfx_idx = (sfx_idx + 1) % sfx_players.size()
 	pl.stream = sfx[n]
 	pl.pitch_scale = pitch
-	pl.volume_db = vol_db + 2.0   # 音效檔留了餘裕，這裡統一補一點
+	pl.volume_db = vol_db + 2.0 + _gain_db(sfx_vol)   # 音效檔留了餘裕，這裡統一補一點
 	pl.play()
 
 
 func _show_settings() -> void:
 	var items: Array = [
-		[T("音效：%s") % (T("開") if sfx_on else T("關")), func() -> void: _set_sfx(not sfx_on)],
-		[T("音樂：%s") % (T("開") if music_on else T("關")), func() -> void: _set_music(not music_on)],
 		[T("語言：%s") % I18n.NATIVE[I18n.lang], _show_language],
 		[T("選關"), _show_level_select],
 	]
@@ -1643,7 +1658,11 @@ func _show_settings() -> void:
 		items.append([T("移除廣告"), _show_buy])
 		items.append([T("恢復購買"), _restore_purchase])
 	items.append([T("關閉"), _close_overlay])
-	_show_dialog(T("設定"), "", items)
+	var sliders: Array = [
+		_volume_row(T("音效"), sfx_vol, _on_sfx_slider, func() -> void: _play("pick")),
+		_volume_row(T("音樂"), music_vol, _on_music_slider, Callable()),
+	]
+	_show_dialog(T("設定"), "", items, sliders)
 
 
 # ───────────────────────── 選關 ─────────────────────────
@@ -1801,21 +1820,97 @@ func _on_restore_finished(found: bool) -> void:
 		_show_dialog(T("恢復購買"), T("找不到購買紀錄"), [[T("知道了"), _close_overlay]])
 
 
-func _set_sfx(v: bool) -> void:
-	sfx_on = v
-	_save_flag("sfx_off", not v)
-	_show_settings()
+## 一列音量拉桿：左邊名稱、中間拉桿、右邊百分比。on_change(0～1) 拖動時即時呼叫；on_release 放開手指時呼叫（可以是空的 Callable）
+func _volume_row(title: String, value: float, on_change: Callable, on_release: Callable) -> Control:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 10)
+	row.custom_minimum_size = Vector2(340, 48)
+	var name_l := Label.new()
+	name_l.text = title
+	name_l.custom_minimum_size = Vector2(78, 0)
+	name_l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	name_l.add_theme_font_size_override("font_size", _fit_size(title, 22, 76.0))
+	name_l.add_theme_color_override("font_color", Color("5a3d2b"))
+	row.add_child(name_l)
+	var sl := HSlider.new()
+	sl.min_value = 0.0
+	sl.max_value = 100.0
+	sl.step = 5.0
+	sl.value = roundf(value * 100.0)
+	sl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	sl.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	sl.custom_minimum_size = Vector2(150, 44)
+	sl.focus_mode = Control.FOCUS_NONE
+	var track := StyleBoxFlat.new()
+	track.bg_color = Color("e6d2b4")
+	track.set_corner_radius_all(7)
+	track.content_margin_top = 7
+	track.content_margin_bottom = 7
+	var fill := StyleBoxFlat.new()
+	fill.bg_color = Color("ff9a2e")
+	fill.set_corner_radius_all(7)
+	fill.content_margin_top = 7
+	fill.content_margin_bottom = 7
+	sl.add_theme_stylebox_override("slider", track)
+	sl.add_theme_stylebox_override("grabber_area", fill)
+	sl.add_theme_stylebox_override("grabber_area_highlight", fill)
+	var knob := _slider_knob()
+	sl.add_theme_icon_override("grabber", knob)
+	sl.add_theme_icon_override("grabber_highlight", knob)
+	sl.add_theme_icon_override("grabber_disabled", knob)
+	row.add_child(sl)
+	var pct := Label.new()
+	pct.text = "%d%%" % int(sl.value)
+	pct.custom_minimum_size = Vector2(52, 0)
+	pct.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	pct.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	pct.add_theme_color_override("font_color", Color("5a3d2b"))
+	row.add_child(pct)
+	sl.value_changed.connect(func(v: float) -> void:
+		pct.text = "%d%%" % int(v)
+		on_change.call(v / 100.0))
+	if on_release.is_valid():
+		sl.drag_ended.connect(func(_changed: bool) -> void: on_release.call())
+	return row
 
 
-func _set_music(v: bool) -> void:
-	music_on = v
-	_save_flag("music_off", not v)
-	if music_player.stream != null:
-		if v:
-			music_player.play()
-		else:
-			music_player.stop()
-	_show_settings()
+## 拉桿的圓形把手（橘色、白邊），比內建的大，手指好拖
+func _slider_knob() -> Texture2D:
+	var d := 34
+	var img := Image.create(d, d, false, Image.FORMAT_RGBA8)
+	var c := Vector2(d / 2.0, d / 2.0)
+	for y in d:
+		for x in d:
+			var r := Vector2(x + 0.5, y + 0.5).distance_to(c)
+			if r <= 16.0:
+				var col := Color("8a4a12") if r > 14.0 else Color.WHITE if r > 11.0 else Color("ff8a1f")
+				img.set_pixel(x, y, col)
+	return ImageTexture.create_from_image(img)
+
+
+func _on_sfx_slider(v: float) -> void:
+	sfx_vol = v
+	_save_volume("sfx_vol", v)
+
+
+func _on_music_slider(v: float) -> void:
+	music_vol = v
+	_save_volume("music_vol", v)
+	_apply_music_volume()
+
+
+func _load_volume(key: String, old_off_flag: String) -> float:
+	var cf := ConfigFile.new()
+	if cf.load(SAVE_PATH) == OK and cf.has_section_key("progress", key):
+		return clampf(float(cf.get_value("progress", key, 1.0)), 0.0, 1.0)
+	return 0.0 if _load_flag(old_off_flag) else 1.0
+
+
+func _save_volume(key: String, v: float) -> void:
+	var cf := ConfigFile.new()
+	cf.load(SAVE_PATH)
+	cf.set_value("progress", key, v)
+	cf.save(SAVE_PATH)
 
 
 # ───────────────────────── 求救道具與廣告 ─────────────────────────
@@ -1841,7 +1936,7 @@ func _reset_helpers() -> void:
 		hint_free = 1
 	else:
 		# 暫存格還有 3 格的關卡給 3 次，暫存格變少的後段關卡給 5 次
-		undo_left = UNDO_FREE_MID if slot_open >= 3 else UNDO_FREE_LATE
+		undo_left = UNDO_FREE_MID if _tier() == 0 else UNDO_FREE_LATE
 		reveal_free = 0
 		hint_free = 0
 	ad_this_level = false
@@ -1887,9 +1982,13 @@ func _paid_reveal() -> void:
 	_do_reveal()
 
 
-## 求救份量的級距：暫存格 3 格的關卡 0、2 格 1、1 格 2
+## 求救份量的級距（看關卡位置，不看暫存格數）：第 1–180 關 0、181–255 關 1、256 關起 2。
+## 2026-11-17 關卡改成最多 2 格暫存格之後，沿用原本三段的分界，求救份量與免費撤回次數維持不變。
 func _tier() -> int:
-	return clampi(3 - slot_open, 0, 2)
+	var l := level
+	if l > MAX_LEVEL:
+		l = 150 + (level - MAX_LEVEL - 1) % 150 + 1   # 第 301 關起循環使用第 151–300 關
+	return 0 if l <= 180 else 1 if l <= 255 else 2
 
 
 func _hidden_tiles() -> Array:
