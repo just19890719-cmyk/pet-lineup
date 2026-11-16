@@ -2030,11 +2030,20 @@ func _ad_text(with_ad: String, without_ad: String) -> String:
 
 func _ask_more_undo() -> void:
 	var n: int = UNDO_PER_AD[_tier()]
-	_show_dialog(T("撤回用完了"), _ad_text(T("看一段廣告，可以再撤回 %d 次") % n, T("再給你 %d 次撤回") % n), [
+	_show_dialog(T("撤回用完了"), _ad_text(T("看一段廣告，可以再撤回 %d 次") % n, T("再給你 %d 次撤回") % n), _ad_dialog_buttons([
 		[_ad_text(T("看廣告補 %d 次") % n, T("補 %d 次") % n), func() -> void: _reward_ad(_grant_undo)],
 		[T("重新開始（免費）"), _on_restart],
 		[T("不用了"), _close_overlay],
-	])
+	]))
+
+
+## 看廣告的詢問對話框：沒買免廣告、有商店可用時，在最後一顆（「不用了」）前多放一顆「移除廣告」
+func _ad_dialog_buttons(btns: Array) -> Array:
+	if no_ads or not _shop_visible():
+		return btns
+	var out: Array = btns.duplicate()
+	out.insert(out.size() - 1, [T("移除廣告"), _show_buy])
+	return out
 
 
 func _grant_undo() -> void:
@@ -2063,10 +2072,10 @@ func _request_unlock(k: int) -> void:
 	if tut_active:
 		_unlock_slot(k)
 		return
-	_show_dialog(T("解鎖暫存格"), _ad_text(T("看一段廣告，這一關多一格暫存格"), T("這一關多一格暫存格")), [
+	_show_dialog(T("解鎖暫存格"), _ad_text(T("看一段廣告，這一關多一格暫存格"), T("這一關多一格暫存格")), _ad_dialog_buttons([
 		[_ad_text(T("看廣告解鎖"), T("解鎖")), func() -> void: _reward_ad(func() -> void: _unlock_slot(k))],
 		[T("不用了"), _close_overlay],
-	])
+	]))
 
 
 func _on_reveal() -> void:
@@ -2081,10 +2090,10 @@ func _on_reveal() -> void:
 		_show_used_up(T("翻問號"), BUYER_REVEAL_PER_LEVEL)
 		return
 	var n: int = REVEAL_PER_USE[_tier()]
-	_show_dialog(T("翻開問號"), _ad_text(T("看一段廣告，隨機翻開 %d 個問號") % n, T("隨機翻開 %d 個問號") % n), [
+	_show_dialog(T("翻開問號"), _ad_text(T("看一段廣告，隨機翻開 %d 個問號") % n, T("隨機翻開 %d 個問號") % n), _ad_dialog_buttons([
 		[_ad_text(T("看廣告翻開"), T("翻開")), func() -> void: _reward_ad(_paid_reveal)],
 		[T("不用了"), _close_overlay],
-	])
+	]))
 
 
 func _do_reveal() -> void:
@@ -2335,10 +2344,10 @@ func _on_hint() -> void:
 	var n: int = HINT_STEPS[_tier()]
 	var with_ad := T("看一段廣告，告訴你下一步怎麼走") if n == 1 else T("看一段廣告，告訴你接下來 %d 步怎麼走") % n
 	var without_ad := T("告訴你下一步怎麼走") if n == 1 else T("告訴你接下來 %d 步怎麼走") % n
-	_show_dialog(T("提示"), _ad_text(with_ad, without_ad), [
+	_show_dialog(T("提示"), _ad_text(with_ad, without_ad), _ad_dialog_buttons([
 		[_ad_text(T("看廣告拿提示"), T("拿提示")), func() -> void: _reward_ad(_paid_hint)],
 		[T("不用了"), _close_overlay],
-	])
+	]))
 
 
 func _run_hint() -> void:
