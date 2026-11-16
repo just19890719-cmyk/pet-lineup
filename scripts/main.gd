@@ -104,8 +104,10 @@ var sfx: Dictionary = {}        # 音效名稱 → AudioStream
 var sfx_players: Array = []
 var sfx_idx := 0
 var music_player: AudioStreamPlayer
-var sfx_vol := 1.0              # 音效音量 0.0 ～ 1.0（設定裡的拉桿；0 = 靜音）
-var music_vol := 1.0            # 音樂音量 0.0 ～ 1.0
+const SFX_VOL_DEFAULT := 0.35   # 第一次開遊戲的預設音量（拉桿位置；使用者 2026-11-17 指定）
+const MUSIC_VOL_DEFAULT := 0.65
+var sfx_vol := SFX_VOL_DEFAULT      # 音效音量 0.0 ～ 1.0（設定裡的拉桿；0 = 靜音）
+var music_vol := MUSIC_VOL_DEFAULT  # 音樂音量 0.0 ～ 1.0
 var combo := 0                  # 連續幾步都有消除（音調逐次升高）
 var last_tick := -1.0
 
@@ -143,8 +145,8 @@ func _ready() -> void:
 	no_ads = _load_flag("no_ads")
 	_init_store_and_ads()
 	# 音量：沒存過就看舊版的開關（關 = 0，開 = 1）
-	sfx_vol = _load_volume("sfx_vol", "sfx_off")
-	music_vol = _load_volume("music_vol", "music_off")
+	sfx_vol = _load_volume("sfx_vol", "sfx_off", SFX_VOL_DEFAULT)
+	music_vol = _load_volume("music_vol", "music_off", MUSIC_VOL_DEFAULT)
 	_init_audio()
 	level = _load_level()
 	best_level = max(level, _load_best())
@@ -1920,11 +1922,11 @@ func _on_music_slider(v: float) -> void:
 	_apply_music_volume()
 
 
-func _load_volume(key: String, old_off_flag: String) -> float:
+func _load_volume(key: String, old_off_flag: String, default_vol: float) -> float:
 	var cf := ConfigFile.new()
 	if cf.load(SAVE_PATH) == OK and cf.has_section_key("progress", key):
-		return clampf(float(cf.get_value("progress", key, 1.0)), 0.0, 1.0)
-	return 0.0 if _load_flag(old_off_flag) else 1.0
+		return clampf(float(cf.get_value("progress", key, default_vol)), 0.0, 1.0)
+	return 0.0 if _load_flag(old_off_flag) else default_vol   # 舊版存過「關」就維持靜音，否則用預設
 
 
 func _save_volume(key: String, v: float) -> void:
