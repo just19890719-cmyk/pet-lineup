@@ -12,7 +12,7 @@ const REAL_INTERSTITIAL := "ca-app-pub-6023320630940952/9603571897"   # AdMob「
 
 # 【送審前一定要改成 false】TestFlight 測試用：true 時正式版也改用谷歌測試廣告，
 # 並在「廣告還沒準備好」對話框多顯示錯誤原因，用來確認廣告接線有沒有通。
-const DEBUG_ADS := true
+const DEBUG_ADS := false
 
 const RETRY_SECONDS := 20.0       # 載入失敗後隔多久再試
 

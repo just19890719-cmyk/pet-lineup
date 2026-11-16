@@ -24,10 +24,13 @@ const TUT := [
 ]
 # [動物種類數, 欄數, 每欄容量]
 const LevelData := preload("res://scripts/level_data.gd")
+const LevelVariants := preload("res://scripts/level_variants.gd")   # 每關的其他盤面（開局隨機抽一種）
 const I18n := preload("res://scripts/i18n.gd")
 const MAX_LEVEL := 300
 
 var level: int = 1
+var vary_boards := true       # 開局從這一關的幾種盤面裡隨機抽一種、動物也隨機分配（測試參數 --fixed-boards 可關掉）
+var force_variant := -1       # 測試用：指定盤面版本（0 = 正式盤面），-1 = 照 vary_boards
 var best_level: int = 1       # 玩到過的最遠關卡（選關畫面可以回到 1 ～ best_level）
 var top_pad := 0.0            # 動態島／瀏海要讓開的高度（畫面座標），整個畫面往下推這麼多
 var cols: Array = []          # Array[Array[Dictionary]]，索引 0 = 最底
@@ -124,6 +127,10 @@ func _ready() -> void:
 	I18n.lang = I18n.LANGS.find(saved_lang) if I18n.LANGS.has(saved_lang) else I18n.detect(OS.get_locale())
 	# 測試用啟動參數只在開發版生效，正式版一律忽略
 	var args: PackedStringArray = OS.get_cmdline_user_args() if OS.is_debug_build() else PackedStringArray()
+	vary_boards = not args.has("--fixed-boards")
+	for a1 in args:
+		if a1.begins_with("--variant="):   # 測試用：指定盤面版本（0 = 正式盤面）
+			force_variant = int(a1.get_slice("=", 1))
 	for a0 in args:
 		if a0.begins_with("--lang="):   # 測試用：只影響這次執行
 			I18n.lang = max(0, I18n.LANGS.find(a0.get_slice("=", 1)))
@@ -203,18 +210,21 @@ func _ready() -> void:
 		# 逐關載入檢查：每種動物數量剛好等於每欄格數、沒有超出格數的欄
 		var bad := 0
 		for l in range(1, MAX_LEVEL + 51):
-			start_level(l)
-			var cnt := {}
-			for c in cols:
-				if c.size() > cap:
+			for v in range(1 + LevelVariants.EXTRA.size()):
+				force_variant = v
+				start_level(l)
+				var cnt := {}
+				for c in cols:
+					if c.size() > cap:
+						bad += 1
+					for t in c:
+						cnt[t["t"]] = cnt.get(t["t"], 0) + 1
+				for k in cnt:
+					if cnt[k] != cap:
+						bad += 1
+				if cols.size() > 8 or slot_open < 1 or slot_open > 3:
 					bad += 1
-				for t in c:
-					cnt[t["t"]] = cnt.get(t["t"], 0) + 1
-			for k in cnt:
-				if cnt[k] != cap:
-					bad += 1
-			if cols.size() > 8 or slot_open < 1 or slot_open > 3:
-				bad += 1
+		force_variant = -1
 		print("check-levels bad=%d" % bad)
 		start_level(level if level <= MAX_LEVEL else 1)
 	if args.has("--audio-check"):
@@ -652,19 +662,28 @@ func _generate(sd: int) -> void:
 		# 第 100 關之後：循環使用後 50 關的盤面，換一批動物、偶數輪左右對調
 		idx = 150 + (level - MAX_LEVEL - 1) % 150
 		flip_cols = ((level - MAX_LEVEL - 1) / 150) % 2 == 0
-	var parts: PackedStringArray = LevelData.DATA[idx].split(";")
+	# 這一關的所有盤面：正式盤面 + 額外幾種，每種都經解題程式確認解得開
+	var variants: Array = [LevelData.DATA[idx]]
+	for ex in LevelVariants.EXTRA:
+		variants.append(ex[idx])
+	# 開發工具「換一個隨機盤面」會傳入自訂種子：同樣的方塊重新洗牌（不保證有解）
+	var custom := sd != level * 7919 + 17
+	var pick := 0
+	if force_variant >= 0:
+		pick = mini(force_variant, variants.size() - 1)
+	elif vary_boards and not custom:
+		pick = randi() % variants.size()
+	var parts: PackedStringArray = (variants[pick] as String).split(";")
 	var head: PackedStringArray = parts[0].split(",")
 	cap = int(head[0])
 	slot_open = int(head[1])
 	var rng := RandomNumberGenerator.new()
-	rng.seed = sd
+	rng.seed = randi() if (vary_boards and not custom and force_variant < 0) else sd
 	var pool: Array = Art.KEYS.duplicate()
 	_shuffle(pool, rng)
 	var texts: Array = Array(parts[1].split("|"))
 	if flip_cols:
 		texts.reverse()
-	# 開發工具「換一個隨機盤面」會傳入自訂種子：同樣的方塊重新洗牌（不保證有解）
-	var custom := sd != level * 7919 + 17
 	var letters: Array = []
 	if custom:
 		for text in texts:
@@ -2209,6 +2228,7 @@ func _save_run() -> void:
 	if idx_of.size() > 99:
 		return
 	cf.set_value("run", "level", level)
+	cf.set_value("run", "cap", cap)
 	cf.set_value("run", "types", "".join(types))
 	cf.set_value("run", "cur", cur)
 	cf.set_value("run", "hist", hist)
@@ -2256,8 +2276,9 @@ func _load_run() -> bool:
 	var types: String = str(cf.get_value("run", "types", ""))
 	var cur_text: String = str(cf.get_value("run", "cur", ""))
 	var unlocked = cf.get_value("run", "unlocked", [])
-	if types == "" or cur_text.count(";") != 1 or cur_text.split(";")[0].split("|").size() != cols.size():
-		return false
+	var saved_cap := int(cf.get_value("run", "cap", 0))
+	if types == "" or cur_text.count(";") != 1 or saved_cap < 4 or cur_text.split(";")[0].split("|").size() > 8:
+		return false   # 沒有記錄每欄上限的舊存檔不接續（現在開局盤面是隨機的，沒辦法對回去）
 	if not (unlocked is Array) or unlocked.size() != SLOT_COUNT:
 		return false
 	var ids: Array = []
@@ -2267,6 +2288,7 @@ func _load_run() -> bool:
 	var cur := _run_decode(cur_text, types, ids, true)
 	if cur["slots"].size() != SLOT_COUNT:
 		return false
+	cap = saved_cap
 	cols = cur["cols"]
 	slots = cur["slots"]
 	history = []

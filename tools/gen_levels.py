@@ -150,10 +150,14 @@ def main():
     """python gen_levels.py 起 迄 → 算這一段並存成分段檔；python gen_levels.py merge → 合併成 level_data.gd"""
     import json
     import sys
-    parts_dir = os.path.join(ROOT, "tools", "level_parts")
+    variant = int(os.environ.get("VARIANT", "0"))   # 0 = 正式關卡；1、2、3… = 每關的其他盤面（開局隨機抽一個）
+    parts_dir = os.path.join(ROOT, "tools", "level_parts" if variant == 0 else "level_parts_v%d" % variant)
     os.makedirs(parts_dir, exist_ok=True)
     if len(sys.argv) >= 2 and sys.argv[1] == "merge":
         merge(parts_dir)
+        return
+    if len(sys.argv) >= 2 and sys.argv[1] == "merge_variants":
+        merge_variants()
         return
     first = int(sys.argv[1]) if len(sys.argv) >= 3 else 1
     last = int(sys.argv[2]) if len(sys.argv) >= 3 else TOTAL
@@ -161,7 +165,7 @@ def main():
     for L in range(first, last + 1):
         T0, cap0, slots, reveal = nominal(L)
         want = target(L)
-        rng = random.Random(L * 1000003)
+        rng = random.Random(L * 1000003 + variant * 7919)   # 版本 0 與原本完全相同
         best = None
         tested = 0
         for T in sorted({max(4, T0 - 1), T0}):
@@ -221,6 +225,40 @@ def merge(parts_dir):
     dev = [abs(r[6] - r[5]) for r in report]
     print("最大偏差 %.1f 分，平均偏差 %.1f 分" % (max(dev), sum(dev) / len(dev)))
 
+
+def merge_variants():
+    """把 tools/level_parts_v1、v2… 合併成 scripts/level_variants.gd；每個版本都要湊齊 1–TOTAL 關，所有盤面（含正式關卡）互不重複"""
+    import json
+    base = [l.split(";")[1].lower() for l in open(os.path.join(ROOT, "scripts", "level_data.gd"), encoding="utf-8")
+            if l.startswith('	"') and ";" in l]
+    assert len(base) == TOTAL, "正式關卡不是 %d 關" % TOTAL
+    versions, seen = [], set(base)
+    v = 1
+    while os.path.isdir(os.path.join(ROOT, "tools", "level_parts_v%d" % v)):
+        d = os.path.join(ROOT, "tools", "level_parts_v%d" % v)
+        lines, report = [], []
+        for name in sorted(os.listdir(d)):
+            if name.startswith("part_") and name.endswith(".json"):
+                j = json.load(open(os.path.join(d, name), encoding="utf-8"))
+                lines += j["lines"]
+                report += j["report"]
+        assert [r[0] for r in report] == list(range(1, TOTAL + 1)), "版本 %d 的分段檔沒有湊齊 1–%d 關" % (v, TOTAL)
+        for l in lines:
+            b = l.split(";")[1].lower()
+            assert b not in seen, "版本 %d 有重複的盤面" % v
+            seen.add(b)
+        versions.append(lines)
+        v += 1
+    out = os.path.join(ROOT, "scripts", "level_variants.gd")
+    with open(out, "w", encoding="utf-8", newline="\n") as f:
+        f.write("extends RefCounted\n")
+        f.write("## 每一關的其他盤面（正式盤面在 level_data.gd），由 tools/gen_levels.py（VARIANT=1、2…）產生並經解題程式確認解得開，請勿手改。\n")
+        f.write("## EXTRA[k][i] = 第 i+1 關的第 k+2 種盤面，格式同 level_data.gd。開局時從正式盤面加這些裡隨機抽一種。\n\n")
+        f.write("const EXTRA: Array = [\n")
+        for lines in versions:
+            f.write("\t[\n" + "\n".join("\t" + l for l in lines) + "\n\t],\n")
+        f.write("]\n")
+    print("已合併 %d 種額外盤面，共 %d 個盤面，沒有重複" % (len(versions), len(seen)))
 
 if __name__ == "__main__":
     main()
