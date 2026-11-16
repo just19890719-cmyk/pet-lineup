@@ -1701,7 +1701,9 @@ func _show_level_select() -> void:
 	grid.add_theme_constant_override("h_separation", 8)
 	grid.add_theme_constant_override("v_separation", 8)
 	scroll.add_child(grid)
-	for l in range(1, best_level + 1):
+	# 電腦開發版（從編輯器或執行遊戲.bat 開啟）列出全部關卡方便檢查；手機正式版只到玩過的最遠關卡
+	var top_level := MAX_LEVEL if OS.is_debug_build() else best_level
+	for l in range(1, top_level + 1):
 		var b := Button.new()
 		b.text = str(l)
 		b.custom_minimum_size = LEVEL_BTN
