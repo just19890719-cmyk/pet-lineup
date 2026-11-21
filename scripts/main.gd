@@ -229,6 +229,8 @@ func _ready() -> void:
 		force_variant = -1
 		print("check-levels bad=%d" % bad)
 		start_level(level if level <= MAX_LEVEL else 1)
+	if args.has("--rule-test"):
+		_rule_test()
 	if args.has("--audio-check"):
 		var ms = music_player.stream
 		print("audio-check sfx=%d music=%s type=%s loop=%s length=%.1f playing=%s" % [sfx.size(), ms != null, ms.get_class() if ms != null else "-", ms.loop if ms is AudioStreamOggVorbis else false, ms.get_length() if ms != null else 0.0, music_player.playing])
@@ -912,6 +914,8 @@ func _check_complete(i: int) -> void:
 	for tile in c:
 		if tile["t"] != t:
 			return
+		if not tile["r"]:
+			return   # 還有沒翻開的問號：要先翻開才算排好（把上面的搬走，讓問號翻開再疊回去）
 	var cx := BOARD.position.x + col_w * (i + 0.5)
 	for j in c.size():
 		var tile: Dictionary = c[j]
@@ -2105,6 +2109,10 @@ func _do_reveal() -> void:
 		t["pop"] = POP_TIME
 		seen[t["id"]] = true
 	_play("flip")
+	# 翻開之後，原本被問號擋住的整欄同款就算排好了
+	for i in cols.size():
+		_check_complete(i)
+	_check_end()
 	_update_ui()
 
 
@@ -2406,8 +2414,15 @@ func _continue_hint() -> void:
 	_update_ui()
 
 
+## 動物種類的字母（小寫）
 func _hint_letter(t: Dictionary) -> String:
 	return char(97 + Art.KEYS.find(t["t"]))
+
+
+## 欄位裡一格的字母：大寫 = 已翻開，小寫 = 還是問號
+func _hint_cell(t: Dictionary) -> String:
+	var ch := _hint_letter(t)
+	return ch.to_upper() if t["r"] else ch
 
 
 ## 欄位字串最上面那一格一定是翻開的（大寫）
@@ -2418,13 +2433,13 @@ func _top_up(col: String) -> String:
 	return col.substr(0, n - 1) + col[n - 1].to_upper()
 
 
-## 目前局面轉成解題用的字串：每欄由下往上，一個字母一隻動物（不分翻開與否，跟 tools/gen_levels.py 同一個模型）
+## 目前局面轉成解題用的字串：每欄由下往上，一個字母一隻動物，大寫 = 已翻開（跟 tools/solver2.py 同一個模型）
 func _hint_state() -> Array:
 	var c0: Array = []
 	for c in cols:
 		var s := ""
 		for t in c:
-			s += _hint_letter(t)
+			s += _hint_cell(t)
 		c0.append(s)
 	var sl: Array = []
 	var nslots := 0
@@ -2457,18 +2472,13 @@ func _solve_hint() -> Dictionary:
 			hint_plan = hint_plan.slice(i)
 			hint_last = hint_plan[0][1]
 			return hint_last
-	# 解題程式把一整串同款當成一步，但遊戲裡問號要翻開才搬得動，所以一步可能要分幾次搬
-	if not hint_plan.is_empty() and hint_last.get("k", "") == "c":
-		var ca: String = c0[hint_last["a"]]
-		var cb: String = c0[hint_last["b"]]
-		if ca != "" and cb != "" and cb.length() < cap and ca[ca.length() - 1] == cb[cb.length() - 1]:
-			return hint_last
 	hint_plan = []
 	hint_last = {}
 	# 深度優先搜尋；每個節點記父節點與走法，找到解後回頭串出整條路線
 	var node_par: Array = [-1]
 	var node_move: Array = [{}]
 	var node_real: Array = [real_key]
+	var node_cs: Array = [[c0, s0]]
 	var stack: Array = [[c0, s0, 0]]
 	var visited := {}
 	var count := 0
@@ -2484,12 +2494,30 @@ func _solve_hint() -> Dictionary:
 					clear = false
 					break
 		if clear:
-			var path: Array = []
+			# 先串出搜尋找到的整條路線，再把繞遠路的地方剪掉：
+			# 路線上某個局面，如果一步就能直接走到後面更遠的局面，就直接走過去
+			var chain: Array = []
 			var cur := ni
-			while node_par[cur] >= 0:
-				path.append([node_real[node_par[cur]], node_move[cur]])
+			while cur >= 0:
+				chain.append(cur)
 				cur = node_par[cur]
-			path.reverse()
+			chain.reverse()
+			var pos := {}
+			for k in chain.size():
+				pos[node_real[chain[k]]] = k
+			var path: Array = []
+			var pi := 0
+			while pi < chain.size() - 1:
+				var cs: Array = node_cs[chain[pi]]
+				var best := pi + 1
+				var best_move: Dictionary = node_move[chain[pi + 1]]
+				for sm in _sim_moves(cs[0], cs[1], nslots):
+					var rk: String = "|".join(sm[1]) + ";" + sm[2]
+					if pos.has(rk) and pos[rk] > best:
+						best = pos[rk]
+						best_move = sm[3]
+				path.append([node_real[chain[pi]], best_move])
+				pi = best
 			hint_plan = path
 			hint_last = {} if path.is_empty() else path[0][1]
 			return hint_last
@@ -2508,6 +2536,7 @@ func _solve_hint() -> Dictionary:
 			node_par.append(ni)
 			node_move.append(m[3])
 			node_real.append("|".join(m[1]) + ";" + m[2])
+			node_cs.append([m[1], m[2]])
 			stack.append([m[1], m[2], node_par.size() - 1])
 	return {"fail": "none"}
 
@@ -2516,6 +2545,7 @@ func _solve_hint() -> Dictionary:
 ## 順序必須跟 tools/gen_levels.py 的 moves() 完全一樣（同優先度維持產生順序），
 ## 這樣每一關從開局搜尋的節點數才會跟產生關卡時相同，保證在上限內算得出來。
 func _sim_moves(c: Array, s: String, nslots: int) -> Array:
+	# 欄位字串：大寫 = 已翻開、小寫 = 問號；暫存格字串都是小寫種類字母。跟 tools/solver2.py 的 moves() 同一套
 	var out: Array = []
 	var n := c.size()
 	for i in n:
@@ -2523,9 +2553,9 @@ func _sim_moves(c: Array, s: String, nslots: int) -> Array:
 		if a == "":
 			continue
 		var al := a.length()
-		var x := a[al - 1]
+		var x := a[al - 1].to_lower()
 		var r := 1
-		while r < al and a[al - 1 - r] == x:
+		while r < al and a[al - 1 - r] == a[al - 1 - r].to_upper() and a[al - 1 - r].to_lower() == x:
 			r += 1
 		var seen_empty := false
 		for j in n:
@@ -2536,7 +2566,7 @@ func _sim_moves(c: Array, s: String, nslots: int) -> Array:
 				continue
 			var pri := 0
 			if b != "":
-				if b[b.length() - 1] != x:
+				if b[b.length() - 1].to_lower() != x:
 					continue
 			else:
 				if r == al or seen_empty:
@@ -2545,9 +2575,9 @@ func _sim_moves(c: Array, s: String, nslots: int) -> Array:
 				pri = 3
 			var m: int = min(r, cap - b.length())
 			var nc := c.duplicate()
-			nc[i] = a.substr(0, al - m)
-			var nb := b + x.repeat(m)
-			nc[j] = "" if (nb.length() == cap and nb == x.repeat(cap)) else nb
+			nc[i] = _top_up(a.substr(0, al - m))
+			var nb := b + x.to_upper().repeat(m)
+			nc[j] = "" if (nb.length() == cap and nb == x.to_upper().repeat(cap)) else nb
 			out.append([pri, nc, s, {"k": "c", "a": i, "b": j}])
 	var done := {}
 	for si in s.length():
@@ -2562,7 +2592,7 @@ func _sim_moves(c: Array, s: String, nslots: int) -> Array:
 				continue
 			var pri2 := 1
 			if b2 != "":
-				if b2[b2.length() - 1] != x2:
+				if b2[b2.length() - 1].to_lower() != x2:
 					continue
 			else:
 				if seen_empty2:
@@ -2570,8 +2600,8 @@ func _sim_moves(c: Array, s: String, nslots: int) -> Array:
 				seen_empty2 = true
 				pri2 = 4
 			var nc2 := c.duplicate()
-			var nb2 := b2 + x2
-			nc2[j] = "" if (nb2.length() == cap and nb2 == x2.repeat(cap)) else nb2
+			var nb2 := b2 + x2.to_upper()
+			nc2[j] = "" if (nb2.length() == cap and nb2 == x2.to_upper().repeat(cap)) else nb2
 			out.append([pri2, nc2, s.substr(0, si) + s.substr(si + 1), {"k": "s", "t": x2, "b": j}])
 	if s.length() < nslots:
 		for i in n:
@@ -2581,17 +2611,17 @@ func _sim_moves(c: Array, s: String, nslots: int) -> Array:
 			var al3 := a3.length()
 			var good := false
 			if al3 > 1:
-				var under := a3[al3 - 2]
+				var under := a3[al3 - 2].to_lower()
 				for j in n:
-					if j != i and c[j] != "" and (c[j] as String)[(c[j] as String).length() - 1] == under:
+					if j != i and c[j] != "" and (c[j] as String)[(c[j] as String).length() - 1].to_lower() == under:
 						good = true
 						break
 			var nc3 := c.duplicate()
-			nc3[i] = a3.substr(0, al3 - 1)
+			nc3[i] = _top_up(a3.substr(0, al3 - 1))
 			var chars: Array = []
 			for ch in s:
 				chars.append(ch)
-			chars.append(a3[al3 - 1])
+			chars.append(a3[al3 - 1].to_lower())
 			chars.sort()
 			out.append([5 if good else 6, nc3, "".join(chars), {"k": "p", "a": i}])
 	var ordered: Array = []
@@ -2600,6 +2630,51 @@ func _sim_moves(c: Array, s: String, nslots: int) -> Array:
 			if m2[0] == pri_level:
 				ordered.append(m2)
 	return ordered
+
+
+## 測試用（--rule-test）：一欄疊滿同款但最底下還是問號時不能消除；問號翻開後才消除
+func _rule_test() -> void:
+	tut_active = false
+	var ka: String = Art.KEYS[0]
+	var kb: String = Art.KEYS[1]
+	cap = 5
+	var fails := 0
+	for round in 3:
+		for i in cols.size():
+			cols[i] = []
+		for k in SLOT_COUNT:
+			slots[k] = null
+		history.clear()
+		sel_col = -1
+		sel_slot = -1
+		game_over = false
+		cols[0] = [_new_tile(ka, false), _new_tile(ka, true)]
+		cols[1] = [_new_tile(kb, true), _new_tile(ka, true), _new_tile(ka, true), _new_tile(ka, true)]
+		sel_col = 1
+		_tap_col(0)
+		# 搬滿後底下還是問號：不能消除
+		if cols[0].size() != 5:
+			fails += 1
+			print("rule-test 失敗(%d)：問號沒翻開就消除了 size=%d" % [round, cols[0].size()])
+		if round == 0:
+			cols[0][0]["r"] = true
+			_check_complete(0)
+		elif round == 1:
+			_do_reveal()
+		else:
+			# 把上面的搬走讓問號翻開，再疊回去才消除
+			cols[2] = []
+			sel_col = 0
+			_tap_col(2)   # 搬走上面 4 隻（空欄）
+			if cols[0].size() != 1 or not cols[0][0]["r"]:
+				fails += 1
+				print("rule-test 失敗(%d)：搬走後問號沒翻開 size=%d" % [round, cols[0].size()])
+			sel_col = 2
+			_tap_col(0)   # 疊回去
+		if not cols[0].is_empty():
+			fails += 1
+			print("rule-test 失敗(%d)：翻開後該消除卻沒消除 size=%d" % [round, cols[0].size()])
+	print("rule-test fails=%d" % fails)
 
 
 ## 測試用：有提示就照著點，沒提示就要一個
